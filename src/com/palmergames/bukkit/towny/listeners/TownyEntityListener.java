@@ -16,6 +16,7 @@ import com.palmergames.bukkit.towny.utils.EntityTypeUtil;
 import com.palmergames.bukkit.util.BukkitTools;
 import com.palmergames.bukkit.util.ItemLists;
 
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
@@ -50,6 +51,7 @@ import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
 import org.bukkit.event.entity.EntityInteractEvent;
 import org.bukkit.event.entity.EntityTargetLivingEntityEvent;
+import org.bukkit.event.entity.ItemSpawnEvent;
 import org.bukkit.event.entity.LingeringPotionSplashEvent;
 import org.bukkit.event.entity.PigZapEvent;
 import org.bukkit.event.entity.PotionSplashEvent;
@@ -61,10 +63,13 @@ import org.bukkit.event.hanging.HangingPlaceEvent;
 import org.bukkit.potion.PotionEffect;
 import org.bukkit.potion.PotionEffectType;
 import org.bukkit.projectiles.BlockProjectileSource;
+import org.jetbrains.annotations.ApiStatus;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * 
@@ -586,19 +591,28 @@ public class TownyEntityListener implements Listener {
 		Entity entity = event.getEntity();
 		if (townyWorld.isUsingPlotManagementWildEntityRevert() && entity != null && townyWorld.isProtectingExplosionEntity(entity)) {
 			int count = 0;
+			Map<Location, Material> regeneratingBlocks = new HashMap<>();
 			for (Block block : event.blockList()) {
 				// Only regenerate in the wilderness.
 				if (!TownyAPI.getInstance().isWilderness(block))
 					continue;
+				
 				// Check the white/blacklist
 				if (!townyWorld.isBlockAllowedToRevert(block.getType()))
 					continue;
+				
 				// Don't start a revert on a block that is going to be reverted.
 				if (TownyRegenAPI.hasProtectionRegenTask(new BlockLocation(block.getLocation())))
 					continue;
+				
 				count++;
 				TownyRegenAPI.beginProtectionRegenTask(block, count, townyWorld, event);
+				
+				block.getDrops().stream().findFirst().ifPresent(item -> regeneratingBlocks.put(block.getLocation(), item.getType()));
 			}
+			
+			if (regeneratingBlocks.size() > 0)
+				captureItems(regeneratingBlocks);
 		}
 	}
 
@@ -880,9 +894,28 @@ public class TownyEntityListener implements Listener {
 			}
 		}
 	}
+	
 	@EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
 	public void onDoorBreak(EntityBreakDoorEvent event) {
 		if (TownyAPI.getInstance().isTownyWorld(event.getBlock().getWorld()) && !TownyAPI.getInstance().isWilderness(event.getBlock().getLocation()))
 			event.setCancelled(true);
+	}
+	
+	@EventHandler(priority = EventPriority.LOW, ignoreCancelled = true)
+	public void onItemSpawn(ItemSpawnEvent event) {
+		if (event.getEntity().getItemStack().getType() == captureItemLocations.get(event.getLocation().getBlock().getLocation()))
+			event.setCancelled(true);
+	}
+	
+	private static final Map<Location, Material> captureItemLocations = new HashMap<>();
+	
+	@ApiStatus.Internal
+	public static void captureItems(Map<Location, Material> map) {
+		captureItemLocations.putAll(map);
+
+		Bukkit.getScheduler().runTask(Towny.getPlugin(), () -> {
+			for (Location location : map.keySet())
+				captureItemLocations.remove(location);
+		});
 	}
 }

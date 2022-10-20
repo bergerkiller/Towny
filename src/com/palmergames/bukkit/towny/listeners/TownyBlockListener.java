@@ -15,6 +15,7 @@ import com.palmergames.bukkit.towny.utils.BorderUtil;
 import com.palmergames.bukkit.util.BlockUtil;
 import com.palmergames.bukkit.util.ItemLists;
 
+import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.Sound;
 import org.bukkit.block.Block;
@@ -42,7 +43,9 @@ import org.bukkit.event.block.BlockSpreadEvent;
 import org.bukkit.event.block.CauldronLevelChangeEvent;
 import org.bukkit.event.block.EntityBlockFormEvent;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 
 public class TownyBlockListener implements Listener {
 
@@ -304,19 +307,27 @@ public class TownyBlockListener implements Listener {
 		 */
 		if (townyWorld.isUsingPlotManagementWildBlockRevert() && townyWorld.isProtectingExplosionBlock(material)) {
 			int count = 0;
+			Map<Location, Material> regeneratingBlocks = new HashMap<>();
 			for (Block block : event.blockList()) {
 				// Only regenerate in the wilderness.
 				if (!TownyAPI.getInstance().isWilderness(block))
 					continue;
+				
 				// Check the white/blacklist
 				if (!townyWorld.isBlockAllowedToRevert(block.getType()))
 					continue;
+				
 				// Don't start a revert on a block that is going to be reverted.
 				if (TownyRegenAPI.hasProtectionRegenTask(new BlockLocation(block.getLocation())))
 					continue;
+				
 				count++;
 				TownyRegenAPI.beginProtectionRegenTask(block, count, townyWorld, event);
+				regeneratingBlocks.put(block.getLocation(), block.getType());
 			}
+			
+			if (regeneratingBlocks.size() > 0)
+				TownyEntityListener.captureItems(regeneratingBlocks);
 		}
 	}
 	
