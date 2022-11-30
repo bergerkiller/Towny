@@ -281,9 +281,11 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 
 		Resident resident = getResidentOrThrow(player);
 		TownBlock townBlock = TownyAPI.getInstance().getTownBlock(player);
+
+		// Stops all commands except perm, claim and info being run in the wilderness.
 		if (townBlock == null && plotCommandAllowedInWilderness(split[0]))
 			throw new TownyException(Translatable.of("msg_not_claimed_1"));
-		
+
 		if (townBlock != null && townBlock.getTownOrNull().isRuined())
 			throw new TownyException(Translatable.of("msg_err_cannot_use_command_because_town_ruined"));
 
@@ -386,92 +388,49 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		if (townBlock.hasPlotObjectGroup() && !"name".equalsIgnoreCase(split[0]) && !TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0]))
 			throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_set"));
 
-		if (split[0].equalsIgnoreCase("perm")) {
+		switch(split[0]) {
+		case "perm":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_PERM.getNode());
-			// Set plot level permissions (if the plot owner) or
-			// Mayor/Assistant of the town.
-			
-			// Test we are allowed to work on this plot
-			plotTestOwner(resident, townBlock);
-
+			plotTestOwner(resident, townBlock); // Test we are allowed to work on this plot
 			setTownBlockPermissions(player, townBlock.getTownBlockOwner(), townBlock, StringMgmt.remFirstArg(split));
-
-			return;
-
-		} else if (split[0].equalsIgnoreCase("name")) {
+			break;
+		case "name":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_NAME.getNode());
-			// Test we are allowed to work on this plot
-			plotTestOwner(resident, townBlock);
-			if (split.length == 1) {
-				townBlock.setName("");
-				TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_removed"));
-				townBlock.save();
+			plotTestOwner(resident, townBlock); // Test we are allowed to work on this plot
+			parsePlotSetName(player, split, townBlock);
+			break;
+		case "outpost":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_TOWN_CLAIM_OUTPOST.getNode());
+			plotTestOwner(resident, townBlock); // Test we are allowed to work on this plot
+			parsePlotSetOutpost(player, resident, townBlock);
+			break;
+		default:
+			if (tryPlotSetAddonCommand(player, split))
 				return;
-			}
-			
-			String newName = StringMgmt.join(StringMgmt.remFirstArg(split), "_");
-			
-			// Test if the plot name contains invalid characters.
-			if (NameValidation.isBlacklistName(newName))
-				throw new TownyException(Translatable.of("msg_invalid_name"));
 
-			townBlock.setName(newName);
-			townBlock.save();
-			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_set_to", townBlock.getName()));
-			return;
-		} else if (split[0].equalsIgnoreCase("outpost")) {
-
-			if (TownySettings.isAllowingOutposts()) {
-				checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_TOWN_CLAIM_OUTPOST.getNode());
-				
-				// Test we are allowed to work on this plot
-				plotTestOwner(resident, townBlock);
-				
-				Town town = townBlock.getTownOrNull();
-				TownyWorld townyWorld = townBlock.getWorld();
-				Coord key = Coord.parseCoord(plugin.getCache(player).getLastLocation());
-				
-				if (OutpostUtil.OutpostTests(town, resident, townyWorld, key, resident.isAdmin(), true)) {
-					// Test if they can pay.
-					if (TownyEconomyHandler.isActive() && !town.getAccount().canPayFromHoldings(TownySettings.getOutpostCost())) 
-						throw new TownyException(Translatable.of("msg_err_cannot_afford_to_set_outpost"));
-					 
-					// Create a confirmation for setting outpost.
-					Confirmation.runOnAccept(() -> {
-						// Set the outpost spawn and display feedback.
-						town.addOutpostSpawn(player.getLocation());
-						TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost()), Translatable.of("outpost")));
-					})
-					.setCost(new ConfirmationTransaction(() -> TownySettings.getOutpostCost(), town.getAccount(), "PlotSetOutpost", Translatable.of("msg_err_cannot_afford_to_set_outpost")))
-					.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost())))
-					.sendTo(player);
-				}
-			}
-			return;
-		} else if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0])) {
-			TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_SET, split[0]).execute(player, "plot", split);
-			return;
+			/*
+			 * After trying all of the other /plot set subcommands, attempt to set the townblock type.
+			 */
+			tryPlotSetType(player, resident, townBlock, split);
 		}
-		
-		/*
-		 * After trying all of the other /plot set subcommands, attempt to set the townblock type.
-		 */
-		
+	}
+
+	private void tryPlotSetType(Player player, Resident resident, TownBlock townBlock, String[] split) throws TownyException {
 		checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET.getNode(split[0].toLowerCase()));
 		String plotTypeName = split[0];
-		
+
 		// Handle type being reset
 		if (plotTypeName.equalsIgnoreCase("reset"))
 			plotTypeName = "default";
 
 		TownBlockType townBlockType = TownBlockTypeHandler.getType(plotTypeName);
-		
+
 		if (townBlockType == null)
 			throw new TownyException(Translatable.of("msg_err_not_block_type"));
 
 		if (townBlockType == townBlock.getType())
 			throw new TownyException(Translatable.of("msg_plot_already_of_type", townBlockType.getName()));
-		
+
 		// Test we are allowed to work on this plot
 		plotTestOwner(resident, townBlock);
 
@@ -481,11 +440,11 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 					throw new TownyException(Translatable.of("msg_cant_toggle_pvp_outsider_in_plot"));
 			}
 		}
-		
+
 		BukkitTools.ifCancelledThenThrow(new PlotPreChangeTypeEvent(townBlockType, townBlock, resident));
 
 		double cost = townBlockType.getData().getCost();
-		
+
 		// Test if we can pay first to throw an exception.
 		if (cost > 0 && TownyEconomyHandler.isActive() && !resident.getAccount().canPayFromHoldings(cost))
 			throw new TownyException(Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost)));
@@ -507,12 +466,64 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 						Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost))))
 				.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(cost)))
 				.sendTo(BukkitTools.getPlayerExact(resident.getName()));
-		
+
 		// No cost or economy so no confirmation.
 		} else {
 			townBlock.setType(townBlockType, resident);
 			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_type", plotTypeName));
 		}
+	}
+
+	private boolean tryPlotSetAddonCommand(Player player, String[] split) {
+		if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0])) {
+			TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_SET, split[0]).execute(player, "plot", split);
+			return true;
+		}
+		return false;
+	}
+
+	public void parsePlotSetOutpost(Player player, Resident resident, TownBlock townBlock) throws TownyException {
+		if (!TownySettings.isAllowingOutposts()) 
+			throw new TownyException(Translatable.of("msg_outpost_disable"));
+
+		Town town = townBlock.getTownOrNull();
+		TownyWorld townyWorld = townBlock.getWorld();
+		Coord key = Coord.parseCoord(plugin.getCache(player).getLastLocation());
+		
+		if (OutpostUtil.OutpostTests(town, resident, townyWorld, key, resident.isAdmin(), true)) {
+			// Test if they can pay.
+			if (TownyEconomyHandler.isActive() && !town.getAccount().canPayFromHoldings(TownySettings.getOutpostCost())) 
+				throw new TownyException(Translatable.of("msg_err_cannot_afford_to_set_outpost"));
+			 
+			// Create a confirmation for setting outpost.
+			Confirmation.runOnAccept(() -> {
+				// Set the outpost spawn and display feedback.
+				town.addOutpostSpawn(player.getLocation());
+				TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost()), Translatable.of("outpost")));
+			})
+			.setCost(new ConfirmationTransaction(() -> TownySettings.getOutpostCost(), town.getAccount(), "PlotSetOutpost", Translatable.of("msg_err_cannot_afford_to_set_outpost")))
+			.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost())))
+			.sendTo(player);
+		}
+	}
+
+	public void parsePlotSetName(Player player, String[] split, TownBlock townBlock) throws TownyException {
+		if (split.length == 1) {
+			townBlock.setName("");
+			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_removed"));
+			townBlock.save();
+			return;
+		}
+		
+		String newName = StringMgmt.join(StringMgmt.remFirstArg(split), "_");
+		
+		// Test if the plot name contains invalid characters.
+		if (NameValidation.isBlacklistName(newName))
+			throw new TownyException(Translatable.of("msg_invalid_name"));
+
+		townBlock.setName(newName);
+		townBlock.save();
+		TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_set_to", townBlock.getName()));
 	}
 
 	public void parsePlotForSale(Player player, String[] split, Resident resident, TownBlock townBlock) throws TownyException {
@@ -1020,119 +1031,127 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 	 * @param resident Resident using the command.
 	 * @param townBlock - TownBlock object.
 	 * @param split  - Current command arguments.
+	 * @throws TownyException 
 	 */
-	public void plotToggle(Player player, Resident resident, TownBlock townBlock, String[] split) {
+	public void plotToggle(Player player, Resident resident, TownBlock townBlock, String[] split) throws TownyException {
 		if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
 			HelpMenu.PLOT_TOGGLE.send(player);
-		} else {
-
-			try {
-				// Test we are allowed to work on this plot
-				plotTestOwner(resident, townBlock); // ignore the return as
-				// we are only checking
-				// for an exception
-				
-				// Make sure that the player is only operating on a single plot and not a plotgroup.
-				if (townBlock.hasPlotObjectGroup())
-					throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_toggle"));
-				
-				Town town = townBlock.getTownOrNull();
-				if (town == null)
-					throw new TownyException(Translatable.of("msg_not_claimed_1"));
-				
-				Optional<Boolean> choice = Optional.empty();
-				if (split.length == 2) {
-					choice = BaseCommand.parseToggleChoice(split[1]);
-				}
-
-				if (split[0].equalsIgnoreCase("pvp")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_PVP.getNode());
-					// Make sure we are allowed to set these permissions.
-					toggleTest(player, townBlock, StringMgmt.join(split, " "));
-					
-					if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin()) {
-						// Test to see if the pvp cooldown timer is active for the town this plot belongs to.
-						if (CooldownTimerTask.hasCooldown(town.getUUID().toString(), CooldownType.PVP))
-							throw new TownyException(Translatable.of("msg_err_cannot_toggle_pvp_x_seconds_remaining", CooldownTimerTask.getCooldownRemaining(town.getUUID().toString(), CooldownType.PVP)));
-	
-						// Test to see if the pvp cooldown timer is active for this plot.
-						if (CooldownTimerTask.hasCooldown(townBlock.getWorldCoord().toString(), CooldownType.PVP))
-							throw new TownyException(Translatable.of("msg_err_cannot_toggle_pvp_x_seconds_remaining", CooldownTimerTask.getCooldownRemaining(townBlock.getWorldCoord().toString(), CooldownType.PVP)));
-					}
-					
-					// Prevent plot pvp from being enabled if admin pvp is disabled
-					if (town.isAdminDisabledPVP() && !townBlock.getPermissions().pvp)
-						throw new TownyException(Translatable.of("msg_err_admin_controlled_pvp_prevents_you_from_changing_pvp", "adminDisabledPVP", "on"));
-					
-					// Prevent plot pvp from being disabled if admin pvp is enabled
-					if (town.isAdminEnabledPVP() && townBlock.getPermissions().pvp)
-						throw new TownyException(Translatable.of("msg_err_admin_controlled_pvp_prevents_you_from_changing_pvp", "adminEnabledPVP", "off"));
-
-					if (TownySettings.getOutsidersPreventPVPToggle() && choice.orElse(!townBlock.getPermissions().pvp)) {
-						for (Player target : Bukkit.getOnlinePlayers()) {
-							if (!town.hasResident(target) && !player.getName().equals(target.getName()) && townBlock.getWorldCoord().equals(WorldCoord.parseWorldCoord(target)))
-								throw new TownyException(Translatable.of("msg_cant_toggle_pvp_outsider_in_plot"));
-						}
-					}
-
-					// Fire cancellable event directly before setting the toggle.
-					BukkitTools.ifCancelledThenThrow(new PlotTogglePvpEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().pvp)));
-
-					townBlock.getPermissions().pvp = choice.orElse(!townBlock.getPermissions().pvp);
-					// Add a cooldown timer for this plot.
-					if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin())
-						CooldownTimerTask.addCooldownTimer(townBlock.getWorldCoord().toString(), CooldownType.PVP);
-					TownyMessaging.sendMsg(player, Translatable.of("msg_changed_pvp", "Plot", townBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled")));
-
-				} else if (split[0].equalsIgnoreCase("explosion")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_EXPLOSION.getNode());
-					// Make sure we are allowed to set these permissions.
-					toggleTest(player, townBlock, StringMgmt.join(split, " "));
-					// Fire cancellable event directly before setting the toggle.
-					BukkitTools.ifCancelledThenThrow(new PlotToggleExplosionEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().explosion)));
-
-					townBlock.getPermissions().explosion = choice.orElse(!townBlock.getPermissions().explosion);
-					TownyMessaging.sendMsg(player, Translatable.of("msg_changed_expl", "the Plot", townBlock.getPermissions().explosion ? Translatable.of("enabled") : Translatable.of("disabled")));
-
-				} else if (split[0].equalsIgnoreCase("fire")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_FIRE.getNode());
-					// Make sure we are allowed to set these permissions.
-					toggleTest(player, townBlock, StringMgmt.join(split, " "));
-					// Fire cancellable event directly before setting the toggle.
-					BukkitTools.ifCancelledThenThrow(new PlotToggleFireEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().fire)));
-
-					townBlock.getPermissions().fire = choice.orElse(!townBlock.getPermissions().fire);
-					TownyMessaging.sendMsg(player, Translatable.of("msg_changed_fire", "the Plot", townBlock.getPermissions().fire ? Translatable.of("enabled") : Translatable.of("disabled")));
-
-				} else if (split[0].equalsIgnoreCase("mobs")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_MOBS.getNode());
-					// Make sure we are allowed to set these permissions.
-					toggleTest(player, townBlock, StringMgmt.join(split, " "));
-					// Fire cancellable event directly before setting the toggle.
-					BukkitTools.ifCancelledThenThrow(new PlotToggleMobsEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().mobs)));
-
-					townBlock.getPermissions().mobs = choice.orElse(!townBlock.getPermissions().mobs);
-					TownyMessaging.sendMsg(player, Translatable.of("msg_changed_mobs", "the Plot", townBlock.getPermissions().mobs ? Translatable.of("enabled") : Translatable.of("disabled")));
-
-				} else if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_TOGGLE, split[0])) {
-					TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_TOGGLE, split[0]).execute(player, "plot", split);
-				} else {
-					TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_invalid_property", "plot"));
-					return;
-				}
-
-				townBlock.setChanged(true);
-
-				//Change settings event
-				TownBlockSettingsChangedEvent event = new TownBlockSettingsChangedEvent(townBlock);
-				BukkitTools.fireEvent(event);
-
-			} catch (TownyException e) {
-				TownyMessaging.sendErrorMsg(player, e.getMessage(player));
-			}
-			
-			townBlock.save();
+			return;
 		}
+
+		plotTestOwner(resident, townBlock); // Test we are allowed to work on this plot
+
+		// Make sure that the player is only operating on a single plot and not a plotgroup.
+		if (townBlock.hasPlotObjectGroup())
+			throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_toggle"));
+
+		Town town = townBlock.getTownOrNull();
+		if (town == null)
+			throw new TownyException(Translatable.of("msg_not_claimed_1"));
+
+		Optional<Boolean> choice = Optional.empty();
+		if (split.length == 2)
+			choice = BaseCommand.parseToggleChoice(split[1]);
+
+		switch(split[0]) {
+		case "pvp":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_PVP.getNode());
+			parsePlotTogglePVP(player, resident, townBlock, split, town, choice);
+			break;
+		case "explosion":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_EXPLOSION.getNode());
+			parsePlotToggleExplosion(player, townBlock, split, choice);
+			break;
+		case "fire":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_FIRE.getNode());
+			parsePlotToggleFire(player, townBlock, split, choice);
+			break;
+		case "mobs":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TOGGLE_MOBS.getNode());
+			parsePlotToggleMobs(player, townBlock, split, choice);
+			break;
+		default:
+			if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_TOGGLE, split[0])) {
+				TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_TOGGLE, split[0]).execute(player, "plot", split);
+			} else {
+				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_invalid_property", "plot"));
+				return;
+			}	
+		}
+
+		townBlock.setChanged(true);
+		//Change settings event
+		BukkitTools.fireEvent(new TownBlockSettingsChangedEvent(townBlock));
+		townBlock.save();
+	}
+
+	public void parsePlotTogglePVP(Player player, Resident resident, TownBlock townBlock, String[] split, Town town, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+		// Make sure we are allowed to set these permissions.
+		toggleTest(player, townBlock, StringMgmt.join(split, " "));
+
+		if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin()) {
+			// Test to see if the pvp cooldown timer is active for the town this plot belongs to.
+			if (CooldownTimerTask.hasCooldown(town.getUUID().toString(), CooldownType.PVP))
+				throw new TownyException(Translatable.of("msg_err_cannot_toggle_pvp_x_seconds_remaining", CooldownTimerTask.getCooldownRemaining(town.getUUID().toString(), CooldownType.PVP)));
+
+			// Test to see if the pvp cooldown timer is active for this plot.
+			if (CooldownTimerTask.hasCooldown(townBlock.getWorldCoord().toString(), CooldownType.PVP))
+				throw new TownyException(Translatable.of("msg_err_cannot_toggle_pvp_x_seconds_remaining", CooldownTimerTask.getCooldownRemaining(townBlock.getWorldCoord().toString(), CooldownType.PVP)));
+		}
+
+		// Prevent plot pvp from being enabled if admin pvp is disabled
+		if (town.isAdminDisabledPVP() && !townBlock.getPermissions().pvp)
+			throw new TownyException(Translatable.of("msg_err_admin_controlled_pvp_prevents_you_from_changing_pvp", "adminDisabledPVP", "on"));
+		
+		// Prevent plot pvp from being disabled if admin pvp is enabled
+		if (town.isAdminEnabledPVP() && townBlock.getPermissions().pvp)
+			throw new TownyException(Translatable.of("msg_err_admin_controlled_pvp_prevents_you_from_changing_pvp", "adminEnabledPVP", "off"));
+
+		if (TownySettings.getOutsidersPreventPVPToggle() && choice.orElse(!townBlock.getPermissions().pvp)) {
+			for (Player target : Bukkit.getOnlinePlayers()) {
+				if (!town.hasResident(target) && !player.getName().equals(target.getName()) && townBlock.getWorldCoord().equals(WorldCoord.parseWorldCoord(target)))
+					throw new TownyException(Translatable.of("msg_cant_toggle_pvp_outsider_in_plot"));
+			}
+		}
+
+		// Fire cancellable event directly before setting the toggle.
+		BukkitTools.ifCancelledThenThrow(new PlotTogglePvpEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().pvp)));
+
+		townBlock.getPermissions().pvp = choice.orElse(!townBlock.getPermissions().pvp);
+		// Add a cooldown timer for this plot.
+		if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin())
+			CooldownTimerTask.addCooldownTimer(townBlock.getWorldCoord().toString(), CooldownType.PVP);
+		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_pvp", "Plot", townBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled")));
+	}
+
+	public void parsePlotToggleExplosion(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+		// Make sure we are allowed to set these permissions.
+		toggleTest(player, townBlock, StringMgmt.join(split, " "));
+		// Fire cancellable event directly before setting the toggle.
+		BukkitTools.ifCancelledThenThrow(new PlotToggleExplosionEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().explosion)));
+
+		townBlock.getPermissions().explosion = choice.orElse(!townBlock.getPermissions().explosion);
+		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_expl", "the Plot", townBlock.getPermissions().explosion ? Translatable.of("enabled") : Translatable.of("disabled")));
+	}
+
+	public void parsePlotToggleFire(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+		// Make sure we are allowed to set these permissions.
+		toggleTest(player, townBlock, StringMgmt.join(split, " "));
+		// Fire cancellable event directly before setting the toggle.
+		BukkitTools.ifCancelledThenThrow(new PlotToggleFireEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().fire)));
+
+		townBlock.getPermissions().fire = choice.orElse(!townBlock.getPermissions().fire);
+		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_fire", "the Plot", townBlock.getPermissions().fire ? Translatable.of("enabled") : Translatable.of("disabled")));
+	}
+
+	public void parsePlotToggleMobs(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+		// Make sure we are allowed to set these permissions.
+		toggleTest(player, townBlock, StringMgmt.join(split, " "));
+		// Fire cancellable event directly before setting the toggle.
+		BukkitTools.ifCancelledThenThrow(new PlotToggleMobsEvent(townBlock, player, choice.orElse(!townBlock.getPermissions().mobs)));
+
+		townBlock.getPermissions().mobs = choice.orElse(!townBlock.getPermissions().mobs);
+		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_mobs", "the Plot", townBlock.getPermissions().mobs ? Translatable.of("enabled") : Translatable.of("disabled")));
 	}
 
 	/**
