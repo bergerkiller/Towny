@@ -24,6 +24,9 @@ import com.palmergames.bukkit.towny.event.plot.toggle.PlotToggleFireEvent;
 import com.palmergames.bukkit.towny.event.plot.toggle.PlotToggleMobsEvent;
 import com.palmergames.bukkit.towny.event.plot.toggle.PlotTogglePvpEvent;
 import com.palmergames.bukkit.towny.exceptions.AlreadyRegisteredException;
+import com.palmergames.bukkit.towny.exceptions.CancelledEventException;
+import com.palmergames.bukkit.towny.exceptions.NoPermissionException;
+import com.palmergames.bukkit.towny.exceptions.NotRegisteredException;
 import com.palmergames.bukkit.towny.exceptions.TownyException;
 import com.palmergames.bukkit.towny.huds.HUDManager;
 import com.palmergames.bukkit.towny.object.Coord;
@@ -73,6 +76,7 @@ import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.stream.Collectors;
 
 /**
  * Send a list of all general towny plot help commands to player Command: /plot
@@ -155,22 +159,27 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 	@Override
 	public boolean onCommand(CommandSender sender, Command cmd, String commandLabel, String[] args) {
 		
-		if (sender instanceof Player) {
+		if (sender instanceof Player player) {
 			if (plugin.isError()) {
 				TownyMessaging.sendErrorMsg(sender, "Locked in Safe mode!");
 				return false;
 			}
-			Player player = (Player) sender;
+
 			if (!TownyAPI.getInstance().isTownyWorld(player.getWorld())) {
 				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_set_use_towny_off"));
 				return false;
 			}
 
-			if (args == null)
+			if (args == null) {
 				HelpMenu.PLOT_HELP.send(player);
-			else
-				return parsePlotCommand(player, args);
+				return false;
+			}
 
+			try {
+				parsePlotCommand(player, args);
+			} catch (TownyException e) {
+				TownyMessaging.sendErrorMsg(player, e.getMessage(player));
+			}
 		} else
 			// Console
 			HelpMenu.PLOT_HELP.send(sender);
@@ -263,542 +272,489 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		return Collections.emptyList();
 	}
 
-	public boolean parsePlotCommand(Player player, String[] split) {
+	public void parsePlotCommand(Player player, String[] split) throws TownyException {
 
 		if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
 			HelpMenu.PLOT_HELP.send(player);
-		} else {
-
-			Resident resident = TownyUniverse.getInstance().getResident(player.getUniqueId());
-			
-			if (resident == null) {
-				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_not_registered"));
-				return true;
-			}
-			
-			String world = player.getWorld().getName();
-
-			try {
-				
-				TownBlock townBlock = TownyAPI.getInstance().getTownBlock(player);
-				if (townBlock == null && !split[0].equalsIgnoreCase("perm") && !split[0].equalsIgnoreCase("claim") && !"info".equalsIgnoreCase(split[0]))
-					throw new TownyException(Translatable.of("msg_not_claimed_1"));
-				
-				if (!TownyAPI.getInstance().isWilderness(player.getLocation()) && townBlock.getTownOrNull().isRuined())
-					throw new TownyException(Translatable.of("msg_err_cannot_use_command_because_town_ruined"));
-
-				if (split[0].equalsIgnoreCase("claim")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLAIM.getNode());
-
-					List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, new WorldCoord(world, Coord.parseCoord(player)), StringMgmt.remFirstArg(split), true);
-					
-					// Fast-fail if this is a single plot and it is already claimed.
-					if (selection.size() == 1 && selection.get(0).hasTownBlock() && selection.get(0).getTownBlock().hasResident() && !selection.get(0).getTownBlock().isForSale())
-						throw new TownyException(Translatable.of("msg_already_claimed", selection.get(0).getTownBlock().getResidentOrNull()));
-					
-					// Filter to just plots that are for sale.
-					selection = AreaSelectionUtil.filterPlotsForSale(selection);
-
-					// Filter out plots already owned by the player.
-					selection = AreaSelectionUtil.filterUnownedBlocks(resident, selection);
-
-					if (selection.size() > 0) {
-						
-						if (selection.size() + resident.getTownBlocks().size()  > TownySettings.getMaxResidentPlots(resident))
-							throw new TownyException(Translatable.of("msg_max_plot_own", TownySettings.getMaxResidentPlots(resident)));
-						
-						/*
-						 * If a resident has no town, the Town is open, and the plot is not an Embassy:
-						 * Attempt to add the Resident to the town IF the town is not null, the Town is
-						 * not going to exceed the maxResidentsWithoutANation value, and the Town will 
-						 * not exceed the maxResidentsPerTown value.
-						 */
-						if (!resident.hasTown() && townBlock.getTownOrNull().isOpen() && !townBlock.getType().equals(TownBlockType.EMBASSY)) {
-							final Town town = townBlock.getTownOrNull();
-							if (town == null ||
-								(TownySettings.getMaxNumResidentsWithoutNation() > 0 && !town.hasNation() && town.getResidents().size() >= TownySettings.getMaxNumResidentsWithoutNation()) ||
-								(TownySettings.getMaxResidentsPerTown() > 0 && town.getResidents().size() >= TownySettings.getMaxResidentsForTown(town)) ||
-								town.hasOutlaw(resident) ||
-								(resident.isOnline() && !resident.getPlayer().hasPermission(PermissionNodes.TOWNY_COMMAND_TOWN_JOIN.getNode()))) {
-								// Town is null (unlikely) or it would have too many residents, we won't be adding 
-								// them to the town, continue as per usual (it could be an embassy plot.)
-							} else {
-								final List<WorldCoord> coords = selection;
-								Confirmation.runOnAccept(() -> {
-									try {
-										resident.setTown(town);										
-									} catch (AlreadyRegisteredException ignored) {}
-									try {
-										continuePlotClaimProcess(coords, resident, player);
-									} catch (TownyException e) {
-										TownyMessaging.sendErrorMsg(player, e.getMessage(player));
-									}
-								})
-									.setTitle(Translatable.of("msg_you_must_join_this_town_to_claim_this_plot", town.getName()))
-									.sendTo(player);
-								return true;
-							}
-						}
-						continuePlotClaimProcess(selection, resident, player);
-
-					} else {
-						TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_empty_area_selection"));
-					}
-				} else if (split[0].equalsIgnoreCase("evict")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_EVICT.getNode());
-
-					if (!townBlock.hasResident()) {
-						TownyMessaging.sendErrorMsg(player, Translatable.of("msg_no_one_to_evict"));						
-
-					} else {
-						// Test we are allowed to work on this plot
-						// If this fails it will trigger a TownyException.
-						plotTestOwner(resident, townBlock);
-
-						if (townBlock.hasPlotObjectGroup()) {
-							townBlock.getPlotObjectGroup().getTownBlocks().stream().forEach(tb -> {
-									tb.setResident(null);            // Remove Resident.
-									tb.setPlotPrice(-1);             // Set to NotForSale.
-									tb.setType(townBlock.getType()); // Re-set the plot permissions while maintaining plot type. 
-									tb.save();                       // Save townblock.
-							});
-							TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict_group", townBlock.getPlotObjectGroup().getName()));
-							return true;
-						}
-						
-						townBlock.setResident(null); // Remove Resident.
-						townBlock.setPlotPrice(-1);  // Set to NotForSale.
-						townBlock.setType(townBlock.getType()); // Re-set the plot permissions while maintaining plot type.
-						townBlock.save(); // Save townblock.
-						
-						TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict"));
-					}
-
-				} else if (split[0].equalsIgnoreCase("unclaim")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_UNCLAIM.getNode());
-
-					if (split.length == 2 && split[1].equalsIgnoreCase("all")) {
-						// Start the unclaim task
-						new PlotClaim(plugin, player, resident, null, false, false, false).start();
-
-					} else {
-						
-						List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, new WorldCoord(world, Coord.parseCoord(player)), StringMgmt.remFirstArg(split));
-						selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection);
-
-						if (selection.size() > 0) {
-
-							for (WorldCoord coord : selection) {
-								TownBlock block = coord.getTownBlock();
-
-								if (!block.hasPlotObjectGroup()) {
-									// Start the unclaim task
-									new PlotClaim(plugin, player, resident, selection, false, false, false).start();
-									return true;
-								}
-								
-								// Get all the townblocks part of the group.
-								final List<WorldCoord> groupSelection = new ArrayList<>();
-								block.getPlotObjectGroup().getTownBlocks().forEach((tb) -> {
-									groupSelection.add(tb.getWorldCoord());
-								});
-								
-								// Create confirmation.
-								Confirmation.runOnAccept(() -> {
-									new PlotClaim(Towny.getPlugin(), player, resident, groupSelection, false, false, false).start();
-								})
-								.setTitle(Translatable.of("msg_plot_group_unclaim_confirmation", block.getPlotObjectGroup().getTownBlocks().size()).append(" " + Translatable.of("are_you_sure_you_want_to_continue")))
-								.sendTo(player);
-								
-								return true;
-							}
-
-						} else {
-							TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_empty_area_selection"));
-						}
-					}
-
-				} else if (split[0].equalsIgnoreCase("notforsale") || split[0].equalsIgnoreCase("nfs")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_NOTFORSALE.getNode());
-
-					List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, new WorldCoord(world, Coord.parseCoord(player)), StringMgmt.remFirstArg(split));
-					selection = AreaSelectionUtil.filterPlotsForSale(selection);
-					
-					if (resident.hasPermissionNode(PermissionNodes.TOWNY_ADMIN.getNode())) {
-						for (WorldCoord worldCoord : selection) {
-							if (worldCoord.getTownBlock().hasPlotObjectGroup()) {
-								TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_nfs", worldCoord));
-								return false;
-							}
-							setPlotForSale(resident, worldCoord, -1);
-						}
-						return true;
-					}
-					Town town = townBlock.getTownOrNull();
-					if (town == null)
-						throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
-
-					// The follow test will clean up the initial selection fairly well, the plotTestOwner later on in the setPlotForSale will ultimately stop any funny business.
-					if (
-						(resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYOR.getNode()) && town.hasResident(resident))
-						|| (resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYORINUNOWNED.getNode()) && town.hasResident(resident) && !townBlock.hasResident())
-						) {
-						selection = AreaSelectionUtil.filterOwnedBlocks(resident.getTown(), selection); // Treat it as a mayor able to set their town's plots not for sale.
-					} else {
-						selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection); // Treat it as a resident making their own plots not for sale.
-					}
-
-					if (selection.isEmpty())
-						throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
-
-					// Set each WorldCoord in selection not for sale.
-					for (WorldCoord worldCoord : selection) {
-						
-						// Skip over any plots that are part of a PlotGroup.
-						if (worldCoord.getTownBlock().hasPlotObjectGroup()) {
-							TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_nfs", worldCoord));
-							continue;
-						}
-						
-						setPlotForSale(resident, worldCoord, -1);
-					}
-						
-
-				} else if (split[0].equalsIgnoreCase("forsale") || split[0].equalsIgnoreCase("fs")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_FORSALE.getNode());
-
-					WorldCoord pos = new WorldCoord(world, Coord.parseCoord(player));
-					Town town = townBlock.getTownOrNull();
-					if (town == null)
-						throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
-					double plotPrice = town.getPlotTypePrice(townBlock.getType());
-
-					if (split.length > 1) {
-						/*
-						 * This is not a case of '/plot fs' and has a cost and/or an area selection involved.
-						 */
-
-						// areaSelectPivot is how Towny handles the 'within' area selection when setting plots for sale.
-						// Will return -1 if the word 'within' is not found.
-						int areaSelectPivot = AreaSelectionUtil.getAreaSelectPivot(split);
-						List<WorldCoord> selection;
-						
-						if (areaSelectPivot >= 0) { // 'within' has been used in the command, make a selection.
-							selection = AreaSelectionUtil.selectWorldCoordArea(resident, new WorldCoord(world, Coord.parseCoord(player)), StringMgmt.subArray(split, areaSelectPivot + 1, split.length));
-							
-							// The follow test will clean up the initial selection fairly well, the plotTestOwner later on in the setPlotForSale will ultimately stop any funny business.
-							if (
-								(resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYOR.getNode()) && town.hasResident(resident))
-								|| (resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYORINUNOWNED.getNode()) && town.hasResident(resident) && !townBlock.hasResident())
-								) {
-								selection = AreaSelectionUtil.filterOwnedBlocks(resident.getTown(), selection); // Treat it as a mayor able to put their town's plots for sale.
-								selection = AreaSelectionUtil.filterOutResidentBlocks(resident, selection); // Filter out any resident-owned plots.
-							} else {
-								selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection); // Treat it as a resident putting their own plots up for sale.
-							}
-							
-							if (selection.isEmpty()) 
-								throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
-
-						} else { // No 'within' found so this will be a case of /plot fs $, add a single coord to selection.
-							selection = new ArrayList<>();
-							selection.add(pos);
-						}
-
-						// Check that it's not: /plot forsale within rect 3
-						if (areaSelectPivot != 1) {
-							// command was 'plot fs $'
-							plotPrice = MoneyUtil.getMoneyAboveZeroOrThrow(split[1]);
-						}
-
-						// Set each WorldCoord in selection for sale.
-						for (WorldCoord worldCoord : selection) {
-							TownBlock tb = worldCoord.getTownBlock();
-							
-							// Skip over any plots that are part of a PlotGroup.
-							if (tb.hasPlotObjectGroup()) {
-								TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_fs2", worldCoord));
-								continue;
-							}
-							
-							// Otherwise continue on normally.
-							setPlotForSale(resident, worldCoord, plotPrice);
-						}
-					} else {
-						/*
-						 * basic 'plot fs' command
-						 */
-						
-						// Skip over any plots that are part of a PlotGroup.
-						if (pos.getTownBlock().hasPlotObjectGroup()) {
-							TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_fs2", pos));
-							return false;
-						}
-
-						// Otherwise continue on normally.
-						setPlotForSale(resident, pos, plotPrice);
-					}
-
-				} else if (split[0].equalsIgnoreCase("perm")) {
-					
-					parsePlotPermCommand(player, StringMgmt.remFirstArg(split));
-					
-				} else if (split[0].equalsIgnoreCase("info")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_PERM_INFO.getNode());
-					
-					sendPlotInfo(player, StringMgmt.remFirstArg(split));
-				} else if (split[0].equalsIgnoreCase("toggle")) {
-
-					/*
-					 * perm test in the plottoggle.
-					 */
-					// Test we are allowed to work on this plot
-					plotTestOwner(resident, townBlock); // ignore the return as
-					// we are only checking
-					// for an exception
-					
-					// Make sure that the player is only operating on a single plot and not a plotgroup.
-					if (townBlock.hasPlotObjectGroup()) {
-						TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_toggle"));
-						return false;
-					}
-
-					plotToggle(player, new WorldCoord(world, Coord.parseCoord(player)).getTownBlock(), StringMgmt.remFirstArg(split));
-
-				} else if (split[0].equalsIgnoreCase("set")) {
-
-					split = StringMgmt.remFirstArg(split);
-					
-					if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
-
-						HelpMenu.PLOT_SET.send(player);
-
-					} else if (split.length > 0) {
-
-						// Make sure that the player is only operating on a plot object group if one exists.
-						// Commands such as /plot set name or commands added via the api are excluded from this.
-						if (townBlock.hasPlotObjectGroup() && !"name".equalsIgnoreCase(split[0]) && !TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0])) {
-							TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_set"));
-							return false;
-						}
-
-						if (split[0].equalsIgnoreCase("perm")) {
-							checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_PERM.getNode());
-							// Set plot level permissions (if the plot owner) or
-							// Mayor/Assistant of the town.
-							
-							// Test we are allowed to work on this plot
-							plotTestOwner(resident, townBlock);
-
-							setTownBlockPermissions(player, townBlock.getTownBlockOwner(), townBlock, StringMgmt.remFirstArg(split));
-
-							return true;
-
-						} else if (split[0].equalsIgnoreCase("name")) {
-							checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_NAME.getNode());
-							// Test we are allowed to work on this plot
-							plotTestOwner(resident, townBlock);
-							if (split.length == 1) {
-								townBlock.setName("");
-								TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_removed"));
-								townBlock.save();
-								return true;
-							}
-							
-							String newName = StringMgmt.join(StringMgmt.remFirstArg(split), "_");
-							
-							// Test if the plot name contains invalid characters.
-							if (!NameValidation.isBlacklistName(newName)) {								
-								townBlock.setName(newName);
-
-								//townBlock.setChanged(true);
-								townBlock.save();
-
-								TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_set_to", townBlock.getName()));
-
-							} else {
-
-								TownyMessaging.sendErrorMsg(player, Translatable.of("msg_invalid_name"));
-
-							}
-							return true;
-						} else if (split[0].equalsIgnoreCase("outpost")) {
-
-							if (TownySettings.isAllowingOutposts()) {
-								checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_TOWN_CLAIM_OUTPOST.getNode());
-								
-								// Test we are allowed to work on this plot
-								plotTestOwner(resident, townBlock);
-								
-								Town town = townBlock.getTownOrNull();
-								TownyWorld townyWorld = townBlock.getWorld();
-								Coord key = Coord.parseCoord(plugin.getCache(player).getLastLocation());
-								
-								if (OutpostUtil.OutpostTests(town, resident, townyWorld, key, resident.isAdmin(), true)) {
-									// Test if they can pay.
-									if (TownyEconomyHandler.isActive() && !town.getAccount().canPayFromHoldings(TownySettings.getOutpostCost())) 
-										throw new TownyException(Translatable.of("msg_err_cannot_afford_to_set_outpost"));
-									 
-									// Create a confirmation for setting outpost.
-									Confirmation.runOnAccept(() -> {
-										// Set the outpost spawn and display feedback.
-										town.addOutpostSpawn(player.getLocation());
-										TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost()), Translatable.of("outpost")));
-									})
-									.setCost(new ConfirmationTransaction(() -> TownySettings.getOutpostCost(), town.getAccount(), "PlotSetOutpost", Translatable.of("msg_err_cannot_afford_to_set_outpost")))
-									.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost())))
-									.sendTo(player);
-								}
-							}
-							return true;
-						} else if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0])) {
-							TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_SET, split[0]).execute(player, "plot", split);
-							return true;
-						}
-						
-						/*
-						 * After trying all of the other /plot set subcommands, attempt to set the townblock type.
-						 */
-						
-						checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET.getNode(split[0].toLowerCase()));
-						
-						try {
-							String plotTypeName = split[0];
-							
-							// Handle type being reset
-							if (plotTypeName.equalsIgnoreCase("reset"))
-								plotTypeName = "default";
-
-							TownBlockType townBlockType = TownBlockTypeHandler.getType(plotTypeName);
-							
-							if (townBlockType == null)
-								throw new TownyException(Translatable.of("msg_err_not_block_type"));
-
-							if (townBlockType == townBlock.getType())
-								throw new TownyException(Translatable.of("msg_plot_already_of_type", townBlockType.getName()));
-							
-							try {
-								// Test we are allowed to work on this plot
-								plotTestOwner(resident, townBlock); // ignore the return as we
-								// are only checking for an
-								// exception
-							} catch (TownyException e) {
-								TownyMessaging.sendErrorMsg(player, e.getMessage(player));
-								return false;
-							}
-
-							if (TownBlockType.ARENA.equals(townBlockType) && TownySettings.getOutsidersPreventPVPToggle()) {
-								for (Player target : Bukkit.getOnlinePlayers()) {
-									if (!townBlock.getTownOrNull().hasResident(target) && !player.getName().equals(target.getName()) && townBlock.getWorldCoord().equals(WorldCoord.parseWorldCoord(target)))
-										throw new TownyException(Translatable.of("msg_cant_toggle_pvp_outsider_in_plot"));
-								}
-							}
-							
-							BukkitTools.ifCancelledThenThrow(new PlotPreChangeTypeEvent(townBlockType, townBlock, resident));
-
-							double cost = townBlockType.getData().getCost();
-							
-							// Test if we can pay first to throw an exception.
-							if (cost > 0 && TownyEconomyHandler.isActive() && !resident.getAccount().canPayFromHoldings(cost))
-								throw new TownyException(Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost)));
-
-							// Handle payment via a confirmation to avoid suprise costs.
-							if (cost > 0 && TownyEconomyHandler.isActive()) {
-								Confirmation.runOnAccept(() -> {
-									TownyMessaging.sendMsg(resident, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(cost), townBlockType));
-
-									try {
-										townBlock.setType(townBlockType, resident);
-										
-									} catch (TownyException e) {
-										TownyMessaging.sendErrorMsg(resident, e.getMessage(player));
-										return;
-									}
-									TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_type", townBlockType));
-								})
-									.setCost(new ConfirmationTransaction(() -> cost, resident.getAccount(), String.format("Plot set to %s", townBlockType),
-											Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost))))
-									.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(cost)))
-									.sendTo(BukkitTools.getPlayerExact(resident.getName()));
-							
-							// No cost or economy so no confirmation.
-							} else {
-								townBlock.setType(townBlockType, resident);
-								TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_type", plotTypeName));
-							}
-						} catch (TownyException te){
-							TownyMessaging.sendErrorMsg(player, te.getMessage(player));
-						}
-
-					} else {
-
-						HelpMenu.PLOT_SET.send(player);
-					}
-
-				} else if (split[0].equalsIgnoreCase("clear")) {
-
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLEAR.getNode());
-					
-					if (townBlock != null) {
-						
-						if (!townBlock.getWorld().isUsingPlotManagementMayorDelete())
-							throw new TownyException(Translatable.of("msg_err_plot_clear_disabled_in_this_world"));
-
-						/*
-						 * Only allow mayors or plot owners to use this command.
-						 * This will throw an exception if the player isn't a mayor or owner of the plot. 
-						 */
-						plotTestOwner(resident, townBlock);
-
-						BukkitTools.ifCancelledThenThrow(new PlotPreClearEvent(townBlock));
-
-						Set<Material> materialsToDelete = townBlock.getWorld().getPlotManagementMayorDelete();
-						if (materialsToDelete.isEmpty())
-							return true;
-						
-						TownyRegenAPI.deleteMaterialsFromWorldCoord(townBlock.getWorldCoord(), materialsToDelete);
-						TownyMessaging.sendMsg(player, Translatable.of("msg_clear_plot_material", StringMgmt.join(materialsToDelete, ", ")));
-
-						// Raise an event for the claim
-						BukkitTools.fireEvent(new PlotClearEvent(townBlock));
-
-					} else {
-						// Shouldn't ever reach here as a null townBlock should
-						// be caught already in WorldCoord.
-						TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_empty_area_selection"));
-					}
-
-				} else if (split[0].equalsIgnoreCase("group")) {
-
-					return handlePlotGroupCommand(StringMgmt.remFirstArg(split), player);
-
-				} else if (split[0].equalsIgnoreCase("jailcell")) {
-					
-					parsePlotJailCell(player, TownyAPI.getInstance().getTownBlock(player), StringMgmt.remFirstArg(split));
-					return true;
-					
-				} else if (split[0].equalsIgnoreCase("trust")) {
-					checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TRUST.getNode());
-
-					parsePlotTrustCommand(player, StringMgmt.remFirstArg(split));
-					return true;
-					
-				} else if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT, split[0])) {
-					TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT, split[0]).execute(player, "plot", split);
-				} else
-					throw new TownyException(Translatable.of("msg_err_invalid_property", split[0]));
-
-			} catch (TownyException x) {
-				TownyMessaging.sendErrorMsg(player, x.getMessage(player));
-			}
+			return;
 		}
 
-		return true;
+		Resident resident = getResidentOrThrow(player);
+		TownBlock townBlock = TownyAPI.getInstance().getTownBlock(player);
+		if (townBlock == null && plotCommandAllowedInWilderness(split[0]))
+			throw new TownyException(Translatable.of("msg_not_claimed_1"));
+		
+		if (townBlock != null && townBlock.getTownOrNull().isRuined())
+			throw new TownyException(Translatable.of("msg_err_cannot_use_command_because_town_ruined"));
+
+		switch(split[0]) {
+		case "claim":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLAIM.getNode());
+			parsePlotClaim(player, StringMgmt.remFirstArg(split), resident, townBlock);
+			break;
+		case "evict":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_EVICT.getNode());
+			parsePlotEvict(player, resident, townBlock);
+			break;
+		case "unclaim":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_UNCLAIM.getNode());
+			parsePlotUnclaim(player, split, resident);
+			break;
+		case "nfs", "notforsale":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_NOTFORSALE.getNode());
+			parsePlotNotForSale(player, StringMgmt.remFirstArg(split), resident, townBlock);
+			break;
+		case "fs", "forsale":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_FORSALE.getNode());
+			parsePlotForSale(player, split, resident, townBlock);
+			break;
+		case "perm":
+			// Permission tests are internal.
+			parsePlotPermCommand(player, StringMgmt.remFirstArg(split));
+			break;
+		case "info":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_PERM_INFO.getNode());
+			sendPlotInfo(player, StringMgmt.remFirstArg(split));
+			break;
+		case "toggle":
+			// Permission tests are internal.
+			plotToggle(player, resident, townBlock, StringMgmt.remFirstArg(split));
+			break;
+		case "set":
+			// Permission tests are intneral.
+			parsePlotSet(player, StringMgmt.remFirstArg(split), resident, townBlock);
+			break;
+		case "clear":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLEAR.getNode());
+			parsePlotClear(player, resident, townBlock);
+			break;
+		case "jailcell":
+			parsePlotJailCell(player, townBlock, StringMgmt.remFirstArg(split));
+			break;
+		case "group":
+			// Permission tests are internal.
+			handlePlotGroupCommand(StringMgmt.remFirstArg(split), player);
+			break;
+		case "trust":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_TRUST.getNode());
+			parsePlotTrustCommand(player, StringMgmt.remFirstArg(split));
+			break;
+		default:
+			if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT, split[0]))
+				TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT, split[0]).execute(player, "plot", split);
+			else
+				throw new TownyException(Translatable.of("msg_err_invalid_property", split[0]));
+			break;
+		}
+	}
+
+	public void parsePlotClear(Player player, Resident resident, TownBlock townBlock) throws TownyException, CancelledEventException {
+		if (townBlock == null) // Shouldn't ever happen but let's check anyways.
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		if (!townBlock.getWorld().isUsingPlotManagementMayorDelete())
+			throw new TownyException(Translatable.of("msg_err_plot_clear_disabled_in_this_world"));
+
+		/*
+		 * Only allow mayors or plot owners to use this command.
+		 * This will throw an exception if the player isn't a mayor or owner of the plot. 
+		 */
+		plotTestOwner(resident, townBlock);
+
+		BukkitTools.ifCancelledThenThrow(new PlotPreClearEvent(townBlock));
+
+		Set<Material> materialsToDelete = townBlock.getWorld().getPlotManagementMayorDelete();
+		if (materialsToDelete.isEmpty())
+			return;
+
+		TownyRegenAPI.deleteMaterialsFromWorldCoord(townBlock.getWorldCoord(), materialsToDelete);
+		TownyMessaging.sendMsg(player, Translatable.of("msg_clear_plot_material", StringMgmt.join(materialsToDelete, ", ")));
+
+		// Raise an event.
+		BukkitTools.fireEvent(new PlotClearEvent(townBlock));
+	}
+
+	public void parsePlotSet(Player player, String[] split, Resident resident, TownBlock townBlock) throws NoPermissionException, TownyException {
+
+		if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
+			HelpMenu.PLOT_SET.send(player);
+			return;
+		}
+
+		// Make sure that the player is only operating on a plot object group if one exists.
+		// Commands such as /plot set name or commands added via the api are excluded from this.
+		if (townBlock.hasPlotObjectGroup() && !"name".equalsIgnoreCase(split[0]) && !TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0]))
+			throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_set"));
+
+		if (split[0].equalsIgnoreCase("perm")) {
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_PERM.getNode());
+			// Set plot level permissions (if the plot owner) or
+			// Mayor/Assistant of the town.
+			
+			// Test we are allowed to work on this plot
+			plotTestOwner(resident, townBlock);
+
+			setTownBlockPermissions(player, townBlock.getTownBlockOwner(), townBlock, StringMgmt.remFirstArg(split));
+
+			return;
+
+		} else if (split[0].equalsIgnoreCase("name")) {
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_NAME.getNode());
+			// Test we are allowed to work on this plot
+			plotTestOwner(resident, townBlock);
+			if (split.length == 1) {
+				townBlock.setName("");
+				TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_removed"));
+				townBlock.save();
+				return;
+			}
+			
+			String newName = StringMgmt.join(StringMgmt.remFirstArg(split), "_");
+			
+			// Test if the plot name contains invalid characters.
+			if (NameValidation.isBlacklistName(newName))
+				throw new TownyException(Translatable.of("msg_invalid_name"));
+
+			townBlock.setName(newName);
+			townBlock.save();
+			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_set_to", townBlock.getName()));
+			return;
+		} else if (split[0].equalsIgnoreCase("outpost")) {
+
+			if (TownySettings.isAllowingOutposts()) {
+				checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_TOWN_CLAIM_OUTPOST.getNode());
+				
+				// Test we are allowed to work on this plot
+				plotTestOwner(resident, townBlock);
+				
+				Town town = townBlock.getTownOrNull();
+				TownyWorld townyWorld = townBlock.getWorld();
+				Coord key = Coord.parseCoord(plugin.getCache(player).getLastLocation());
+				
+				if (OutpostUtil.OutpostTests(town, resident, townyWorld, key, resident.isAdmin(), true)) {
+					// Test if they can pay.
+					if (TownyEconomyHandler.isActive() && !town.getAccount().canPayFromHoldings(TownySettings.getOutpostCost())) 
+						throw new TownyException(Translatable.of("msg_err_cannot_afford_to_set_outpost"));
+					 
+					// Create a confirmation for setting outpost.
+					Confirmation.runOnAccept(() -> {
+						// Set the outpost spawn and display feedback.
+						town.addOutpostSpawn(player.getLocation());
+						TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost()), Translatable.of("outpost")));
+					})
+					.setCost(new ConfirmationTransaction(() -> TownySettings.getOutpostCost(), town.getAccount(), "PlotSetOutpost", Translatable.of("msg_err_cannot_afford_to_set_outpost")))
+					.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(TownySettings.getOutpostCost())))
+					.sendTo(player);
+				}
+			}
+			return;
+		} else if (TownyCommandAddonAPI.hasCommand(CommandType.PLOT_SET, split[0])) {
+			TownyCommandAddonAPI.getAddonCommand(CommandType.PLOT_SET, split[0]).execute(player, "plot", split);
+			return;
+		}
+		
+		/*
+		 * After trying all of the other /plot set subcommands, attempt to set the townblock type.
+		 */
+		
+		checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET.getNode(split[0].toLowerCase()));
+		String plotTypeName = split[0];
+		
+		// Handle type being reset
+		if (plotTypeName.equalsIgnoreCase("reset"))
+			plotTypeName = "default";
+
+		TownBlockType townBlockType = TownBlockTypeHandler.getType(plotTypeName);
+		
+		if (townBlockType == null)
+			throw new TownyException(Translatable.of("msg_err_not_block_type"));
+
+		if (townBlockType == townBlock.getType())
+			throw new TownyException(Translatable.of("msg_plot_already_of_type", townBlockType.getName()));
+		
+		// Test we are allowed to work on this plot
+		plotTestOwner(resident, townBlock);
+
+		if (TownBlockType.ARENA.equals(townBlockType) && TownySettings.getOutsidersPreventPVPToggle()) {
+			for (Player target : Bukkit.getOnlinePlayers()) {
+				if (!townBlock.getTownOrNull().hasResident(target) && !player.getName().equals(target.getName()) && townBlock.getWorldCoord().equals(WorldCoord.parseWorldCoord(target)))
+					throw new TownyException(Translatable.of("msg_cant_toggle_pvp_outsider_in_plot"));
+			}
+		}
+		
+		BukkitTools.ifCancelledThenThrow(new PlotPreChangeTypeEvent(townBlockType, townBlock, resident));
+
+		double cost = townBlockType.getData().getCost();
+		
+		// Test if we can pay first to throw an exception.
+		if (cost > 0 && TownyEconomyHandler.isActive() && !resident.getAccount().canPayFromHoldings(cost))
+			throw new TownyException(Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost)));
+
+		// Handle payment via a confirmation to avoid suprise costs.
+		if (cost > 0 && TownyEconomyHandler.isActive()) {
+			Confirmation.runOnAccept(() -> {
+				TownyMessaging.sendMsg(resident, Translatable.of("msg_plot_set_cost", TownyEconomyHandler.getFormattedBalance(cost), townBlockType));
+
+				try {
+					townBlock.setType(townBlockType, resident);
+				} catch (TownyException e) {
+					TownyMessaging.sendErrorMsg(resident, e.getMessage(player));
+					return;
+				}
+				TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_type", townBlockType));
+			})
+				.setCost(new ConfirmationTransaction(() -> cost, resident.getAccount(), String.format("Plot set to %s", townBlockType),
+						Translatable.of("msg_err_cannot_afford_plot_set_type_cost", townBlockType, TownyEconomyHandler.getFormattedBalance(cost))))
+				.setTitle(Translatable.of("msg_confirm_purchase", TownyEconomyHandler.getFormattedBalance(cost)))
+				.sendTo(BukkitTools.getPlayerExact(resident.getName()));
+		
+		// No cost or economy so no confirmation.
+		} else {
+			townBlock.setType(townBlockType, resident);
+			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_set_type", plotTypeName));
+		}
+	}
+
+	public void parsePlotForSale(Player player, String[] split, Resident resident, TownBlock townBlock) throws TownyException {
+		WorldCoord pos = WorldCoord.parseWorldCoord(player);
+		Town town = townBlock.getTownOrNull();
+		if (town == null) //Shouldn't be able to happen but check anyways.
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		double plotPrice = town.getPlotTypePrice(townBlock.getType());
+
+		if (split.length == 0) {
+			/*
+			 * basic 'plot fs' command
+			 */
+
+			// Skip over any plots that are part of a PlotGroup.
+			if (pos.getTownBlock().hasPlotObjectGroup())
+				throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_plot_fs2", pos));
+
+			// Otherwise continue on normally.
+			setPlotForSale(resident, pos, plotPrice);
+			return;
+		}
+
+		/*
+		 * This is not a case of '/plot fs' and has a cost and/or an area selection involved.
+		 */
+
+		// areaSelectPivot is how Towny handles the 'within' area selection when setting plots for sale.
+		// Will return -1 if the word 'within' is not found.
+		int areaSelectPivot = AreaSelectionUtil.getAreaSelectPivot(split);
+		List<WorldCoord> selection;
+		
+		if (areaSelectPivot >= 0) { // 'within' has been used in the command, make a selection.
+			selection = AreaSelectionUtil.selectWorldCoordArea(resident, pos, StringMgmt.subArray(split, areaSelectPivot + 1, split.length));
+
+			// The follow test will clean up the initial selection fairly well, the plotTestOwner later on in the setPlotForSale will ultimately stop any funny business.
+			if (
+				(resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYOR.getNode()) && town.hasResident(resident))
+				|| (resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYORINUNOWNED.getNode()) && town.hasResident(resident) && !townBlock.hasResident())
+				) {
+				selection = AreaSelectionUtil.filterOwnedBlocks(resident.getTown(), selection); // Treat it as a mayor able to put their town's plots for sale.
+				selection = AreaSelectionUtil.filterOutResidentBlocks(resident, selection); // Filter out any resident-owned plots.
+			} else {
+				selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection); // Treat it as a resident putting their own plots up for sale.
+			}
+
+			if (selection.isEmpty()) 
+				throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		} else { // No 'within' found so this will be a case of /plot fs $, add a single coord to selection.
+			selection = new ArrayList<>();
+			selection.add(pos);
+		}
+
+		// Check that it's not: /plot forsale within rect 3
+		if (areaSelectPivot != 1) {
+			// command was 'plot fs $'
+			plotPrice = MoneyUtil.getMoneyAboveZeroOrThrow(split[1]);
+		}
+
+		// Set each WorldCoord in selection for sale.
+		for (WorldCoord worldCoord : selection) {
+			TownBlock tb = worldCoord.getTownBlock();
+			
+			// Skip over any plots that are part of a PlotGroup.
+			if (tb.hasPlotObjectGroup()) {
+				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_fs2", worldCoord));
+				continue;
+			}
+			
+			// Otherwise continue on normally.
+			setPlotForSale(resident, worldCoord, plotPrice);
+		}
+	}
+
+	public void parsePlotNotForSale(Player player, String[] args, Resident resident, TownBlock townBlock)
+			throws TownyException, NotRegisteredException {
+		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), args);
+		selection = AreaSelectionUtil.filterPlotsForSale(selection);
+		
+		if (resident.isAdmin()) {
+			for (WorldCoord worldCoord : selection) {
+				if (worldCoord.getTownBlock().hasPlotObjectGroup())
+					throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_plot_nfs", worldCoord));
+				setPlotForSale(resident, worldCoord, -1);
+			}
+			return;
+		}
+		Town town = townBlock.getTownOrNull();
+		if (town == null) // Should not be possible but we check anyways.
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		// The follow test will clean up the initial selection fairly well, the plotTestOwner later on in the setPlotForSale will ultimately stop any funny business.
+		if (
+			(resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYOR.getNode()) && town.hasResident(resident))
+			|| (resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_PLOT_ASMAYORINUNOWNED.getNode()) && town.hasResident(resident) && !townBlock.hasResident())
+			) {
+			selection = AreaSelectionUtil.filterOwnedBlocks(resident.getTown(), selection); // Treat it as a mayor able to set their town's plots not for sale.
+		} else {
+			selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection); // Treat it as a resident making their own plots not for sale.
+		}
+
+		if (selection.isEmpty())
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		// Set each WorldCoord in selection not for sale.
+		for (WorldCoord worldCoord : selection) {
+			
+			// Skip over any plots that are part of a PlotGroup.
+			if (worldCoord.getTownBlock().hasPlotObjectGroup()) {
+				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_plot_belongs_to_group_plot_nfs", worldCoord));
+				continue;
+			}
+			
+			setPlotForSale(resident, worldCoord, -1);
+		}
+	}
+
+	public void parsePlotUnclaim(Player player, String[] split, Resident resident) throws TownyException {
+		if (split.length == 2 && split[1].equalsIgnoreCase("all")) {
+			// Start the unclaim task
+			new PlotClaim(plugin, player, resident, null, false, false, false).start();
+			return;
+		}
+
+		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), StringMgmt.remFirstArg(split));
+		selection = AreaSelectionUtil.filterOwnedBlocks(resident, selection);
+
+		if (selection.size() == 0)
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+
+		for (WorldCoord coord : selection) {
+			TownBlock townBlock = coord.getTownBlock();
+
+			if (!townBlock.hasPlotObjectGroup()) {
+				// Start the unclaim task
+				new PlotClaim(plugin, player, resident, selection, false, false, false).start();
+				return;
+			}
+
+			// Get all the townblocks part of the group.
+			final List<WorldCoord> groupSelection = townBlock.getPlotObjectGroup().getTownBlocks().stream().map(TownBlock::getWorldCoord).collect(Collectors.toList());
+
+			// Create confirmation.
+			Confirmation.runOnAccept(() -> new PlotClaim(Towny.getPlugin(), player, resident, groupSelection, false, false, false).start())
+				.setTitle(Translatable.of("msg_plot_group_unclaim_confirmation", townBlock.getPlotObjectGroup().getTownBlocks().size()).append(" " + Translatable.of("are_you_sure_you_want_to_continue")))
+				.sendTo(player);
+			return;
+		}
+	}
+
+	public void parsePlotEvict(Player player, Resident resident, TownBlock townBlock) throws TownyException {
+		if (!townBlock.hasResident())
+			throw new TownyException(Translatable.of("msg_no_one_to_evict"));
+		// Test we are allowed to work on this plot
+		// If this fails it will trigger a TownyException.
+		plotTestOwner(resident, townBlock);
+
+		if (townBlock.hasPlotObjectGroup()) {
+			townBlock.getPlotObjectGroup().getTownBlocks().stream().forEach(tb -> {
+					tb.setResident(null);            // Remove Resident.
+					tb.setPlotPrice(-1);             // Set to NotForSale.
+					tb.setType(townBlock.getType()); // Re-set the plot permissions while maintaining plot type. 
+					tb.save();                       // Save townblock.
+			});
+			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict_group", townBlock.getPlotObjectGroup().getName()));
+			return;
+		}
+		
+		townBlock.setResident(null); // Remove Resident.
+		townBlock.setPlotPrice(-1);  // Set to NotForSale.
+		townBlock.setType(townBlock.getType()); // Re-set the plot permissions while maintaining plot type.
+		townBlock.save(); // Save townblock.
+		
+		TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict"));
+	}
+
+	public void parsePlotClaim(Player player, String[] args, Resident resident, TownBlock townBlock) throws TownyException {
+		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), args, true);
+		final Town town = townBlock.getTownOrNull();
+
+		// Fast-fail if this is a single plot and it is already claimed.
+		if (selection.size() == 1 && selection.get(0).hasTownBlock() && selection.get(0).getTownBlock().hasResident() && !selection.get(0).getTownBlock().isForSale())
+			throw new TownyException(Translatable.of("msg_already_claimed", selection.get(0).getTownBlock().getResidentOrNull()));
+
+		// Filter to just plots that are for sale.
+		selection = AreaSelectionUtil.filterPlotsForSale(selection);
+
+		// Filter out plots already owned by the player.
+		selection = AreaSelectionUtil.filterUnownedBlocks(resident, selection);
+
+		// Nothing was left to claim.
+		if (selection.size() == 0)
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		if (selection.size() + resident.getTownBlocks().size()  > TownySettings.getMaxResidentPlots(resident))
+			throw new TownyException(Translatable.of("msg_max_plot_own", TownySettings.getMaxResidentPlots(resident)));
+
+		/*
+		 * If a resident has no town, the Town is open, and the plot is not an Embassy,
+		 * the Town is not going to exceed the maxResidentsWithoutANation value, and the
+		 * Town will not exceed the maxResidentsPerTown value, and the resident is not
+		 * an outlaw, and the resident has the permission node for /t join, THEN try to
+		 * add the resident to the town if they confirm their join.
+		 */
+		if (playerIsAbleToJoinViaPlotClaim(resident, townBlock, town)) {
+			final List<WorldCoord> coords = selection;
+			Confirmation.runOnAccept(() -> {
+				try {
+					resident.setTown(town);
+				} catch (AlreadyRegisteredException ignored) {}
+				try {
+					continuePlotClaimProcess(coords, resident, player);
+				} catch (TownyException e) {
+					TownyMessaging.sendErrorMsg(player, e.getMessage(player));
+				}
+			})
+			.setTitle(Translatable.of("msg_you_must_join_this_town_to_claim_this_plot", town.getName()))
+			.sendTo(player);
+			return;
+		}
+		continuePlotClaimProcess(selection, resident, player);
+	}
+
+	public boolean playerIsAbleToJoinViaPlotClaim(Resident resident, TownBlock townBlock, Town town) {
+		return !resident.hasTown() &&
+			town.isOpen() &&
+			!townBlock.getType().equals(TownBlockType.EMBASSY) &&
+			!townNotPermittedAnotherResident(town) &&
+			!town.hasOutlaw(resident) &&
+			resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_TOWN_JOIN.getNode());
+	}
+
+	private boolean townNotPermittedAnotherResident(Town town) {
+		return (TownySettings.getMaxNumResidentsWithoutNation() > 0 && !town.hasNation() && town.getResidents().size() >= TownySettings.getMaxNumResidentsWithoutNation()) ||
+				(TownySettings.getMaxResidentsPerTown() > 0 && town.getResidents().size() >= TownySettings.getMaxResidentsForTown(town));
+	}
+
+	private boolean plotCommandAllowedInWilderness(String command) {
+		return command.equalsIgnoreCase("perm") || command.equalsIgnoreCase("claim") || command.equalsIgnoreCase("info");
 	}
 
 	private void parsePlotJailCell(Player player, TownBlock townBlock, String[] args) {
@@ -1061,18 +1017,25 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 	 * permissions allow)
 	 * 
 	 * @param player - Player.
+	 * @param resident Resident using the command.
 	 * @param townBlock - TownBlock object.
 	 * @param split  - Current command arguments.
 	 */
-	public void plotToggle(Player player, TownBlock townBlock, String[] split) {
-		TownyPermissionSource permSource = TownyUniverse.getInstance().getPermissionSource();
-		
+	public void plotToggle(Player player, Resident resident, TownBlock townBlock, String[] split) {
 		if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
 			HelpMenu.PLOT_TOGGLE.send(player);
 		} else {
 
 			try {
-
+				// Test we are allowed to work on this plot
+				plotTestOwner(resident, townBlock); // ignore the return as
+				// we are only checking
+				// for an exception
+				
+				// Make sure that the player is only operating on a single plot and not a plotgroup.
+				if (townBlock.hasPlotObjectGroup())
+					throw new TownyException(Translatable.of("msg_err_plot_belongs_to_group_toggle"));
+				
 				Town town = townBlock.getTownOrNull();
 				if (town == null)
 					throw new TownyException(Translatable.of("msg_not_claimed_1"));
@@ -1087,7 +1050,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 					// Make sure we are allowed to set these permissions.
 					toggleTest(player, townBlock, StringMgmt.join(split, " "));
 					
-					if (TownySettings.getPVPCoolDownTime() > 0 && !permSource.isTownyAdmin(player)) {
+					if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin()) {
 						// Test to see if the pvp cooldown timer is active for the town this plot belongs to.
 						if (CooldownTimerTask.hasCooldown(town.getUUID().toString(), CooldownType.PVP))
 							throw new TownyException(Translatable.of("msg_err_cannot_toggle_pvp_x_seconds_remaining", CooldownTimerTask.getCooldownRemaining(town.getUUID().toString(), CooldownType.PVP)));
@@ -1117,7 +1080,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 
 					townBlock.getPermissions().pvp = choice.orElse(!townBlock.getPermissions().pvp);
 					// Add a cooldown timer for this plot.
-					if (TownySettings.getPVPCoolDownTime() > 0 && !permSource.isTownyAdmin(player))
+					if (TownySettings.getPVPCoolDownTime() > 0 && !resident.isAdmin())
 						CooldownTimerTask.addCooldownTimer(townBlock.getWorldCoord().toString(), CooldownType.PVP);
 					TownyMessaging.sendMsg(player, Translatable.of("msg_changed_pvp", "Plot", townBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled")));
 
