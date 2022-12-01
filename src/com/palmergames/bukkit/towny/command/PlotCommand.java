@@ -24,9 +24,6 @@ import com.palmergames.bukkit.towny.event.plot.toggle.PlotToggleFireEvent;
 import com.palmergames.bukkit.towny.event.plot.toggle.PlotToggleMobsEvent;
 import com.palmergames.bukkit.towny.event.plot.toggle.PlotTogglePvpEvent;
 import com.palmergames.bukkit.towny.exceptions.AlreadyRegisteredException;
-import com.palmergames.bukkit.towny.exceptions.CancelledEventException;
-import com.palmergames.bukkit.towny.exceptions.NoPermissionException;
-import com.palmergames.bukkit.towny.exceptions.NotRegisteredException;
 import com.palmergames.bukkit.towny.exceptions.TownyException;
 import com.palmergames.bukkit.towny.huds.HUDManager;
 import com.palmergames.bukkit.towny.object.Coord;
@@ -295,9 +292,13 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLAIM.getNode());
 			parsePlotClaim(player, StringMgmt.remFirstArg(split), resident, townBlock);
 			break;
+		case "clear":
+			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLEAR.getNode());
+			parsePlotClear(player, resident, townBlock);
+			break;
 		case "evict":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_EVICT.getNode());
-			parsePlotEvict(player, resident, townBlock);
+			parsePlotEvict(resident, townBlock);
 			break;
 		case "unclaim":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_UNCLAIM.getNode());
@@ -327,10 +328,6 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 			// Permission tests are intneral.
 			parsePlotSet(player, StringMgmt.remFirstArg(split), resident, townBlock);
 			break;
-		case "clear":
-			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_CLEAR.getNode());
-			parsePlotClear(player, resident, townBlock);
-			break;
 		case "jailcell":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_JAILCELL.getNode());
 			parsePlotJailCell(player, resident, townBlock, StringMgmt.remFirstArg(split));
@@ -352,7 +349,68 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotClear(Player player, Resident resident, TownBlock townBlock) throws TownyException, CancelledEventException {
+	public void parsePlotClaim(Player player, String[] args, Resident resident, TownBlock townBlock) throws TownyException {
+		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), args, true);
+		final Town town = townBlock.getTownOrNull();
+
+		// Fast-fail if this is a single plot and it is already claimed.
+		if (selection.size() == 1 && selection.get(0).hasTownBlock() && selection.get(0).getTownBlock().hasResident() && !selection.get(0).getTownBlock().isForSale())
+			throw new TownyException(Translatable.of("msg_already_claimed", selection.get(0).getTownBlock().getResidentOrNull()));
+
+		// Filter to just plots that are for sale.
+		selection = AreaSelectionUtil.filterPlotsForSale(selection);
+
+		// Filter out plots already owned by the player.
+		selection = AreaSelectionUtil.filterUnownedBlocks(resident, selection);
+
+		// Nothing was left to claim.
+		if (selection.size() == 0)
+			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
+
+		if (selection.size() + resident.getTownBlocks().size()  > TownySettings.getMaxResidentPlots(resident))
+			throw new TownyException(Translatable.of("msg_max_plot_own", TownySettings.getMaxResidentPlots(resident)));
+
+		/*
+		 * If a resident has no town, the Town is open, and the plot is not an Embassy,
+		 * the Town is not going to exceed the maxResidentsWithoutANation value, and the
+		 * Town will not exceed the maxResidentsPerTown value, and the resident is not
+		 * an outlaw, and the resident has the permission node for /t join, THEN try to
+		 * add the resident to the town if they confirm their join.
+		 */
+		if (playerIsAbleToJoinViaPlotClaim(resident, townBlock, town)) {
+			final List<WorldCoord> coords = selection;
+			Confirmation.runOnAccept(() -> {
+				try {
+					resident.setTown(town);
+				} catch (AlreadyRegisteredException ignored) {}
+				try {
+					continuePlotClaimProcess(coords, resident, player);
+				} catch (TownyException e) {
+					TownyMessaging.sendErrorMsg(player, e.getMessage(player));
+				}
+			})
+			.setTitle(Translatable.of("msg_you_must_join_this_town_to_claim_this_plot", town.getName()))
+			.sendTo(player);
+			return;
+		}
+		continuePlotClaimProcess(selection, resident, player);
+	}
+
+	private boolean playerIsAbleToJoinViaPlotClaim(Resident resident, TownBlock townBlock, Town town) {
+		return !resident.hasTown() &&
+			town.isOpen() &&
+			!townBlock.getType().equals(TownBlockType.EMBASSY) &&
+			!townNotPermittedAnotherResident(town) &&
+			!town.hasOutlaw(resident) &&
+			resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_TOWN_JOIN.getNode());
+	}
+
+	private boolean townNotPermittedAnotherResident(Town town) {
+		return (TownySettings.getMaxNumResidentsWithoutNation() > 0 && !town.hasNation() && town.getResidents().size() >= TownySettings.getMaxNumResidentsWithoutNation()) ||
+				(TownySettings.getMaxResidentsPerTown() > 0 && town.getResidents().size() >= TownySettings.getMaxResidentsForTown(town));
+	}
+
+	public void parsePlotClear(Player player, Resident resident, TownBlock townBlock) throws TownyException {
 		if (townBlock == null) // Shouldn't ever happen but let's check anyways.
 			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
 
@@ -378,7 +436,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		BukkitTools.fireEvent(new PlotClearEvent(townBlock));
 	}
 
-	public void parsePlotSet(Player player, String[] split, Resident resident, TownBlock townBlock) throws NoPermissionException, TownyException {
+	public void parsePlotSet(Player player, String[] split, Resident resident, TownBlock townBlock) throws TownyException {
 
 		if (split.length == 0 || split[0].equalsIgnoreCase("?")) {
 			HelpMenu.PLOT_SET.send(player);
@@ -399,7 +457,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		case "name":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_PLOT_SET_NAME.getNode());
 			TownyAPI.getInstance().testPlotOwnerOrThrow(resident, townBlock); // Test we are allowed to work on this plot
-			parsePlotSetName(player, split, townBlock);
+			parsePlotSetName(player, StringMgmt.remFirstArg(split), townBlock);
 			break;
 		case "outpost":
 			checkPermOrThrow(player, PermissionNodes.TOWNY_COMMAND_TOWN_CLAIM_OUTPOST.getNode());
@@ -509,15 +567,15 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotSetName(Player player, String[] split, TownBlock townBlock) throws TownyException {
-		if (split.length == 1) {
+	public void parsePlotSetName(Player player, String[] name, TownBlock townBlock) throws TownyException {
+		if (name.length == 0) {
 			townBlock.setName("");
 			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_name_removed"));
 			townBlock.save();
 			return;
 		}
 		
-		String newName = StringMgmt.join(StringMgmt.remFirstArg(split), "_");
+		String newName = StringMgmt.join(name, "_");
 		
 		// Test if the plot name contains invalid characters.
 		if (NameValidation.isBlacklistName(newName))
@@ -602,8 +660,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotNotForSale(Player player, String[] args, Resident resident, TownBlock townBlock)
-			throws TownyException, NotRegisteredException {
+	public void parsePlotNotForSale(Player player, String[] args, Resident resident, TownBlock townBlock) throws TownyException {
 		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), args);
 		selection = AreaSelectionUtil.filterPlotsForSale(selection);
 		
@@ -679,7 +736,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotEvict(Player player, Resident resident, TownBlock townBlock) throws TownyException {
+	public void parsePlotEvict(Resident resident, TownBlock townBlock) throws TownyException {
 		if (!townBlock.hasResident())
 			throw new TownyException(Translatable.of("msg_no_one_to_evict"));
 		// Test we are allowed to work on this plot
@@ -687,81 +744,14 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		TownyAPI.getInstance().testPlotOwnerOrThrow(resident, townBlock);
 
 		if (townBlock.hasPlotObjectGroup()) {
-			townBlock.getPlotObjectGroup().getTownBlocks().stream().forEach(tb -> evictOwnerFromTownBlock(tb));
-			TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict_group", townBlock.getPlotObjectGroup().getName()));
+			townBlock.getPlotObjectGroup().getTownBlocks().stream().forEach(TownBlock::evictOwnerFromTownBlock);
+			TownyMessaging.sendMsg(resident, Translatable.of("msg_plot_evict_group", townBlock.getPlotObjectGroup().getName()));
 			return;
 		}
-		
-		evictOwnerFromTownBlock(townBlock);
-		TownyMessaging.sendMsg(player, Translatable.of("msg_plot_evict"));
-	}
-	
-	private void evictOwnerFromTownBlock(TownBlock townBlock) {
-		townBlock.setResident(null); // Remove Resident.
-		townBlock.setPlotPrice(-1);  // Set to NotForSale.
-		townBlock.setType(townBlock.getType()); // Re-set the plot permissions while maintaining plot type.
-		townBlock.save(); // Save townblock.
-	}
 
-	public void parsePlotClaim(Player player, String[] args, Resident resident, TownBlock townBlock) throws TownyException {
-		List<WorldCoord> selection = AreaSelectionUtil.selectWorldCoordArea(resident, WorldCoord.parseWorldCoord(player), args, true);
-		final Town town = townBlock.getTownOrNull();
-
-		// Fast-fail if this is a single plot and it is already claimed.
-		if (selection.size() == 1 && selection.get(0).hasTownBlock() && selection.get(0).getTownBlock().hasResident() && !selection.get(0).getTownBlock().isForSale())
-			throw new TownyException(Translatable.of("msg_already_claimed", selection.get(0).getTownBlock().getResidentOrNull()));
-
-		// Filter to just plots that are for sale.
-		selection = AreaSelectionUtil.filterPlotsForSale(selection);
-
-		// Filter out plots already owned by the player.
-		selection = AreaSelectionUtil.filterUnownedBlocks(resident, selection);
-
-		// Nothing was left to claim.
-		if (selection.size() == 0)
-			throw new TownyException(Translatable.of("msg_err_empty_area_selection"));
-
-		if (selection.size() + resident.getTownBlocks().size()  > TownySettings.getMaxResidentPlots(resident))
-			throw new TownyException(Translatable.of("msg_max_plot_own", TownySettings.getMaxResidentPlots(resident)));
-
-		/*
-		 * If a resident has no town, the Town is open, and the plot is not an Embassy,
-		 * the Town is not going to exceed the maxResidentsWithoutANation value, and the
-		 * Town will not exceed the maxResidentsPerTown value, and the resident is not
-		 * an outlaw, and the resident has the permission node for /t join, THEN try to
-		 * add the resident to the town if they confirm their join.
-		 */
-		if (playerIsAbleToJoinViaPlotClaim(resident, townBlock, town)) {
-			final List<WorldCoord> coords = selection;
-			Confirmation.runOnAccept(() -> {
-				try {
-					resident.setTown(town);
-				} catch (AlreadyRegisteredException ignored) {}
-				try {
-					continuePlotClaimProcess(coords, resident, player);
-				} catch (TownyException e) {
-					TownyMessaging.sendErrorMsg(player, e.getMessage(player));
-				}
-			})
-			.setTitle(Translatable.of("msg_you_must_join_this_town_to_claim_this_plot", town.getName()))
-			.sendTo(player);
-			return;
-		}
-		continuePlotClaimProcess(selection, resident, player);
-	}
-
-	public boolean playerIsAbleToJoinViaPlotClaim(Resident resident, TownBlock townBlock, Town town) {
-		return !resident.hasTown() &&
-			town.isOpen() &&
-			!townBlock.getType().equals(TownBlockType.EMBASSY) &&
-			!townNotPermittedAnotherResident(town) &&
-			!town.hasOutlaw(resident) &&
-			resident.hasPermissionNode(PermissionNodes.TOWNY_COMMAND_TOWN_JOIN.getNode());
-	}
-
-	private boolean townNotPermittedAnotherResident(Town town) {
-		return (TownySettings.getMaxNumResidentsWithoutNation() > 0 && !town.hasNation() && town.getResidents().size() >= TownySettings.getMaxNumResidentsWithoutNation()) ||
-				(TownySettings.getMaxResidentsPerTown() > 0 && town.getResidents().size() >= TownySettings.getMaxResidentsForTown(town));
+		// Evict and save the townblock.
+		townBlock.evictOwnerFromTownBlock();
+		TownyMessaging.sendMsg(resident, Translatable.of("msg_plot_evict"));
 	}
 
 	private boolean plotCommandAllowedInWilderness(String command) {
@@ -814,7 +804,6 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 			}
 		}
 	}
-	
 
 	/**
 	 * Returns a TownyPermissionChange object representing the change action
@@ -1071,7 +1060,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		townBlock.save();
 	}
 
-	public void parsePlotTogglePVP(Player player, Resident resident, TownBlock townBlock, String[] split, Town town, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+	public void parsePlotTogglePVP(Player player, Resident resident, TownBlock townBlock, String[] split, Town town, Optional<Boolean> choice) throws TownyException {
 		// Make sure we are allowed to set these permissions.
 		toggleTest(player, townBlock, StringMgmt.join(split, " "));
 
@@ -1110,7 +1099,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_pvp", "Plot", townBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled")));
 	}
 
-	public void parsePlotToggleExplosion(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+	public void parsePlotToggleExplosion(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException {
 		// Make sure we are allowed to set these permissions.
 		toggleTest(player, townBlock, StringMgmt.join(split, " "));
 		// Fire cancellable event directly before setting the toggle.
@@ -1120,7 +1109,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_expl", "the Plot", townBlock.getPermissions().explosion ? Translatable.of("enabled") : Translatable.of("disabled")));
 	}
 
-	public void parsePlotToggleFire(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+	public void parsePlotToggleFire(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException {
 		// Make sure we are allowed to set these permissions.
 		toggleTest(player, townBlock, StringMgmt.join(split, " "));
 		// Fire cancellable event directly before setting the toggle.
@@ -1130,7 +1119,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		TownyMessaging.sendMsg(player, Translatable.of("msg_changed_fire", "the Plot", townBlock.getPermissions().fire ? Translatable.of("enabled") : Translatable.of("disabled")));
 	}
 
-	public void parsePlotToggleMobs(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException, CancelledEventException {
+	public void parsePlotToggleMobs(Player player, TownBlock townBlock, String[] split, Optional<Boolean> choice) throws TownyException {
 		// Make sure we are allowed to set these permissions.
 		toggleTest(player, townBlock, StringMgmt.join(split, " "));
 		// Fire cancellable event directly before setting the toggle.
@@ -1399,7 +1388,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotGroupSetTownBlockType(String[] split, Resident resident, TownBlock townBlock, PlotGroup group, Player player, Town town) throws TownyException, CancelledEventException {
+	public void parsePlotGroupSetTownBlockType(String[] split, Resident resident, TownBlock townBlock, PlotGroup group, Player player, Town town) throws TownyException {
 
 		String plotTypeName = split[0];
 
@@ -1550,7 +1539,7 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 		}
 	}
 
-	public void parsePlotGroupTrust(String[] split, TownBlock townBlock, Player player) throws TownyException, CancelledEventException {
+	public void parsePlotGroupTrust(String[] split, TownBlock townBlock, Player player) throws TownyException {
 		if (split.length < 3) {
 			HelpMenu.PLOT_GROUP_TRUST_HELP.send(player);
 			return;
