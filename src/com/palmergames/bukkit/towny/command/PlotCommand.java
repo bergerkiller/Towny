@@ -1635,27 +1635,33 @@ public class PlotCommand extends BaseCommand implements CommandExecutor {
 			Town town = groupBlock.getTownOrNull();
 			if (town == null) continue;
 
-			switch(split[0].toLowerCase(Locale.ROOT)) {
-			case "pvp":
-				tryToggleTownBlockPVP(player, resident, groupBlock, split, town, choice);
-				endingMessage = Translatable.of("msg_changed_pvp", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled"));
-				break;
-			case "explosion":
-				tryToggleTownBlockExplosion(player, groupBlock, split, choice);
-				endingMessage = Translatable.of("msg_changed_expl", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().explosion ? Translatable.of("enabled") : Translatable.of("disabled"));
-				break;
-			case "fire":
-				tryToggleTownBlockFire(player, groupBlock, split, choice);
-				endingMessage = Translatable.of("msg_changed_fire", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().fire ? Translatable.of("enabled") : Translatable.of("disabled"));
-				break;
-			case "mobs":
-				tryToggleTownBlockMobs(player, groupBlock, split, choice);
-				endingMessage = Translatable.of("msg_changed_mobs", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().mobs ? Translatable.of("enabled") : Translatable.of("disabled"));
-				break;
-			default:
-				TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_invalid_property", "plot"));
-				return;
-			}	
+			try {
+				switch(split[0].toLowerCase(Locale.ROOT)) {
+				case "pvp":
+					tryToggleTownBlockPVP(player, resident, groupBlock, split, town, choice);
+					endingMessage = Translatable.of("msg_changed_pvp", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().pvp ? Translatable.of("enabled") : Translatable.of("disabled"));
+					break;
+				case "explosion":
+					tryToggleTownBlockExplosion(player, groupBlock, split, choice);
+					endingMessage = Translatable.of("msg_changed_expl", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().explosion ? Translatable.of("enabled") : Translatable.of("disabled"));
+					break;
+				case "fire":
+					tryToggleTownBlockFire(player, groupBlock, split, choice);
+					endingMessage = Translatable.of("msg_changed_fire", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().fire ? Translatable.of("enabled") : Translatable.of("disabled"));
+					break;
+				case "mobs":
+					tryToggleTownBlockMobs(player, groupBlock, split, choice);
+					endingMessage = Translatable.of("msg_changed_mobs", Translatable.of("msg_the_plot_group"), groupBlock.getPermissions().mobs ? Translatable.of("enabled") : Translatable.of("disabled"));
+					break;
+				default:
+					TownyMessaging.sendErrorMsg(player, Translatable.of("msg_err_invalid_property", "plot"));
+					return;
+				}
+			} catch (TownyException e) {
+				// Catch the error message and continue through the PlotGroup's townblocks.
+				TownyMessaging.sendErrorMsg(player, e.getMessage(player));
+				continue;
+			}
 
 			groupBlock.setChanged(true);
 
