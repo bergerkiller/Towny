@@ -4,7 +4,7 @@ import com.palmergames.bukkit.towny.TownyMessaging;
 import com.palmergames.util.FileMgmt;
 
 import java.io.IOException;
-import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 
 public class FlatFileSaveTask implements Runnable {
@@ -25,7 +25,7 @@ public class FlatFileSaveTask implements Runnable {
 	@Override
 	public void run() {
 		try {
-			FileMgmt.mapToFile(map, Path.of(path));
+			FileMgmt.mapToFile(map, Paths.get(path));
 		} catch (IOException ex) {
 			TownyMessaging.sendErrorMsg("Null Error saving to file - " + path);
 			ex.printStackTrace();
