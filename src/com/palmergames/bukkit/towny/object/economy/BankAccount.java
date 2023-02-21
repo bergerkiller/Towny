@@ -150,10 +150,10 @@ public class BankAccount extends Account {
 	/**
 	 * Adds debt to a Town debtBalance
 	 * @param amount the amount to add to the debtBalance.
-	 * @return true if the BankAccount is a town bank account.
+	 * @return true if the BankAccount is a town bank account and bankruptcy is enabled..
 	 */
 	private boolean addDebt(double amount) {
-		if (isTownAccount()) {
+		if (isTownAccount() && TownySettings.isTownBankruptcyEnabled()) {
 			setTownDebt(getTownDebt() + amount);
 			return true;
 		}
