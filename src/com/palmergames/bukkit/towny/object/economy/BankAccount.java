@@ -4,7 +4,10 @@ import com.palmergames.bukkit.towny.TownyEconomyHandler;
 import com.palmergames.bukkit.towny.TownyMessaging;
 import com.palmergames.bukkit.towny.TownySettings;
 import com.palmergames.bukkit.towny.TownyUniverse;
+import com.palmergames.bukkit.towny.event.economy.TownEntersBankruptcyEvent;
 import com.palmergames.bukkit.towny.object.Town;
+import com.palmergames.bukkit.util.BukkitTools;
+
 import org.bukkit.World;
 import org.jetbrains.annotations.Nullable;
 
@@ -89,15 +92,19 @@ public class BankAccount extends Account {
 		if (isBankrupt())
 			return addDebt(amount);
 
-		if (!canPayFromHoldings(amount)) {
+		if (!canPayFromHoldings(amount) && isAllowedToEnterBankruptcy()) {
 
-			// Calculate debt.
-			double amountInDebt = amount - getHoldingBalance();
+			// Calculate initial amount debt the town will take on.
+			double newDebt = amount - getHoldingBalance();
 
-			if(amountInDebt <= getDebtCap()) {
+			if (newDebt <= getDebtCap()) {
 				// Empty out account.
 				boolean success = TownyEconomyHandler.setBalance(getName(), 0, world);
-				success &= addDebt(amountInDebt);
+				success &= addDebt(newDebt);
+
+				// Fire an event if the Town will be allowed to take on this new debt.
+				if (success)
+					BukkitTools.fireEvent(new TownEntersBankruptcyEvent(getTown()));
 
 				return success;
 			} else {
@@ -108,6 +115,11 @@ public class BankAccount extends Account {
 		// Otherwise continue like normal.
 		return TownyEconomyHandler.subtract(getName(), amount, world);
 	}
+
+	private boolean isAllowedToEnterBankruptcy() {
+		return TownySettings.isTownBankruptcyEnabled() && getTown() != null;
+	}
+
 
 	@Override
 	protected boolean addMoney(double amount) {
