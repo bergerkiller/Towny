@@ -120,7 +120,6 @@ public class BankAccount extends Account {
 		return TownySettings.isTownBankruptcyEnabled() && getTown() != null;
 	}
 
-
 	@Override
 	protected boolean addMoney(double amount) {
 		// Check balance cap.
