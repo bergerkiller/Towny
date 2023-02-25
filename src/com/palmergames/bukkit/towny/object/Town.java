@@ -1,5 +1,6 @@
 package com.palmergames.bukkit.towny.object;
 
+import com.google.common.collect.Lists;
 import com.palmergames.bukkit.towny.Towny;
 import com.palmergames.bukkit.towny.TownyAPI;
 import com.palmergames.bukkit.towny.TownyEconomyHandler;
@@ -32,6 +33,7 @@ import net.kyori.adventure.audience.Audience;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.entity.Player;
+import org.jetbrains.annotations.ApiStatus;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -62,7 +64,7 @@ public class Town extends Government implements TownBlockOwner {
 	private Map<UUID, Town> enemies = new LinkedHashMap<>();
 	private final Set<Resident> trustedResidents = new HashSet<>();
 	private final Map<UUID, Town> trustedTowns = new LinkedHashMap<>();
-	private List<Location> outpostSpawns = new ArrayList<>();
+	private final List<Position> outpostSpawns = new ArrayList<>();
 	private List<Jail> jails = null;
 	private HashMap<String, PlotGroup> plotGroups = null;
 	private TownBlockTypeCache plotTypeCache = new TownBlockTypeCache();
@@ -656,8 +658,8 @@ public class Town extends Government implements TownBlockOwner {
 			setWorld(homeBlock.getWorld());
 
 		// Unset the spawn if it is not inside of the new homeblock.
-		if (spawn != null && !homeBlock.getWorldCoord().equals(Coord.parseCoord(spawn))) {
-			TownyUniverse.getInstance().removeSpawnPoint(spawn);
+		if (spawn != null && !homeBlock.getWorldCoord().equals(spawn.worldCoord())) {
+			TownyUniverse.getInstance().removeSpawnPoint(SpawnPointLocation.parsePos(spawn));
 			spawn = null;
 		}
 
@@ -849,15 +851,19 @@ public class Town extends Government implements TownBlockOwner {
 
 	@Override
 	public void setSpawn(Location spawn) {
-		this.spawn = spawn;
-		if (spawn != null)
-			TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(spawn, SpawnPointType.TOWN_SPAWN));
+		if (this.spawn != null)
+			TownyUniverse.getInstance().removeSpawnPoint(spawn);
+		
+		this.spawn = spawn == null ? null : Position.ofLocation(spawn);
+		
+		if (this.spawn != null)
+			TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(this.spawn, SpawnPointType.TOWN_SPAWN));
 	}
 
 	@Override
 	public Location getSpawn() throws TownyException {
 		if (hasHomeBlock() && spawn != null) {
-			return spawn;
+			return spawn.asLocation();
 		} else {
 			this.spawn = null;
 			throw new TownyException(Translation.of("msg_err_town_has_not_set_a_spawn_location"));
@@ -867,7 +873,25 @@ public class Town extends Government implements TownBlockOwner {
 	@Nullable
 	@Override
 	public Location getSpawnOrNull() {
-		return spawn;
+		if (this.spawn != null)
+			return this.spawn.asLocation();
+		
+		return null;
+	}
+	
+	@Nullable
+	@Override
+	public Position spawnPosition() {
+		return this.spawn;
+	}
+	
+	public void spawnPosition(Position spawn) {
+		if (this.spawn != null)
+			TownyUniverse.getInstance().removeSpawnPoint(SpawnPointLocation.parsePos(this.spawn));
+		
+		this.spawn = spawn;
+		if (spawn != null)
+			TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(spawn, SpawnPointType.TOWN_SPAWN));
 	}
 
 	public boolean hasHomeBlock() {
@@ -927,21 +951,25 @@ public class Town extends Government implements TownBlockOwner {
 	public TownyPermission getPermissions() {
 		return permissions;
 	}
+	
+	public void addOutpostSpawn(Location location) {
+		addOutpostSpawn(Position.ofLocation(location));
+	}
 
 	/**
 	 * Add or update an outpost spawn for a town.
 	 * Saves the TownBlock if it is not already an Outpost.
 	 * Saves the Town when finished.
 	 * 
-	 * @param spawn - Location to set an outpost's spawn point
+	 * @param position position to set an outpost's spawn point
 	 */
-	public void addOutpostSpawn(Location spawn) {
-		TownBlock townBlock = TownyAPI.getInstance().getTownBlock(spawn);
+	public void addOutpostSpawn(Position position) {
+		TownBlock townBlock = position.worldCoord().getTownBlockOrNull();
 		if (townBlock == null || !townBlock.hasTown() || !townBlock.getTownOrNull().equals(this))
 			return;
 		
 		// Remove any potential previous outpost spawn at this location (when run via /t set outpost.)
-		removeOutpostSpawn(Coord.parseCoord(spawn));
+		removeOutpostSpawn(position.worldCoord());
 
 		// Set the TownBlock to be an outpost.
 		if (!townBlock.isOutpost()) {
@@ -950,7 +978,7 @@ public class Town extends Government implements TownBlockOwner {
 		}
 
 		// Add to the towns' outpost list.
-		outpostSpawns.add(spawn);
+		outpostSpawns.add(position);
 		
 		// Add a SpawnPoint so a particle effect is displayed.
 		TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(spawn, SpawnPointType.OUTPOST_SPAWN));
@@ -962,11 +990,12 @@ public class Town extends Government implements TownBlockOwner {
 	/**
 	 * Only to be called from the Loading methods.
 	 * 
-	 * @param spawn - Location to set Outpost's spawn point
+	 * @param position Location to set Outpost's spawn point
 	 */
-	public void forceAddOutpostSpawn(Location spawn) {
-		outpostSpawns.add(spawn);
-		TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(spawn, SpawnPointType.OUTPOST_SPAWN));
+	@ApiStatus.Internal
+	public void forceAddOutpostSpawn(Position position) {
+		outpostSpawns.add(position);
+		TownyUniverse.getInstance().addSpawnPoint(new SpawnPoint(position, SpawnPointType.OUTPOST_SPAWN));
 	}
 
 	/**
@@ -981,7 +1010,7 @@ public class Town extends Government implements TownBlockOwner {
 		if (getMaxOutpostSpawn() == 0 && TownySettings.isOutpostsLimitedByLevels())
 			throw new TownyException(Translation.of("msg_err_town_has_no_outpost_spawns_set"));
 
-		return outpostSpawns.get(Math.min(getMaxOutpostSpawn() - 1, Math.max(0, index - 1)));
+		return outpostSpawns.get(Math.min(getMaxOutpostSpawn() - 1, Math.max(0, index - 1))).asLocation();
 	}
 
 	public int getMaxOutpostSpawn() {
@@ -989,12 +1018,12 @@ public class Town extends Government implements TownBlockOwner {
 	}
 
 	public boolean hasOutpostSpawn() {
-		return (!outpostSpawns.isEmpty());
+		return !outpostSpawns.isEmpty();
 	}
 
 	// Used because (perhaps) some mysql databases do not properly save a townblock's outpost flag.
 	private boolean isAnOutpost(Coord coord) {
-		return new ArrayList<>(outpostSpawns).stream().anyMatch(spawn -> Coord.parseCoord(spawn).equals(coord));
+		return new ArrayList<>(outpostSpawns).stream().anyMatch(spawn -> spawn.worldCoord().equals(coord));
 	}
 
 	/**
@@ -1003,7 +1032,7 @@ public class Town extends Government implements TownBlockOwner {
 	 * @return List of outpostSpawns
 	 */
 	public List<Location> getAllOutpostSpawns() {
-		return new ArrayList<>(outpostSpawns);
+		return Collections.unmodifiableList(Lists.transform(this.outpostSpawns, Position::asLocation));
 	}
 
 	public void removeOutpostSpawn(Coord coord) {
@@ -1174,7 +1203,10 @@ public class Town extends Government implements TownBlockOwner {
 	}
 
 	public void setOutpostSpawns(List<Location> outpostSpawns) {
-		this.outpostSpawns = outpostSpawns;
+		this.outpostSpawns.clear();
+		
+		for (Location location : outpostSpawns)
+			addOutpostSpawn(location);
 	}
 
 	public boolean isAlliedWith(Town othertown) {
@@ -1682,6 +1714,15 @@ public class Town extends Government implements TownBlockOwner {
 	 */
 	public boolean isInsideTown(@NotNull Location location) {
 		return this.equals(WorldCoord.parseWorldCoord(location).getTownOrNull());
+	}
+
+	/**
+	 * Tests whether a position is inside this town's boundaries
+	 * @param position The position
+	 * @return Whether the position is inside this town.
+	 */
+	public boolean isInsideTown(@NotNull Position position) {
+		return this.equals(position.worldCoord().getTownOrNull());
 	}
 	
 	/**
